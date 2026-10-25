@@ -5,11 +5,13 @@ Xuất kết quả: results/baseline_results.csv và results/baseline_per_image.
 
 import os
 import sys
+import re
 import argparse
 import csv
 from pathlib import Path
 from PIL import Image
 import numpy as np
+import cv2
 import torch
 import torch.nn.functional as F
 from torchvision.transforms.functional import to_tensor
@@ -90,6 +92,8 @@ def compute_lpips_val(restored_t, target_t, device):
         return -1.0
     try:
         with torch.no_grad():
+            if restored_t.shape != target_t.shape:
+                target_t = F.interpolate(target_t, size=restored_t.shape[2:], mode='bilinear', align_corners=False)
             r = restored_t.to(device) * 2.0 - 1.0
             t = target_t.to(device) * 2.0 - 1.0
             val = loss_fn_alex.to(device)(r, t)
@@ -204,10 +208,18 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
     for img_file in in_images:
         tar_file = tar_p / img_file.name
         if not tar_file.exists():
-            clean_stem = img_file.name.lower().replace('rain-', '').replace('norain-', '')
-            matches = [f for f in tar_p.glob('*') if clean_stem in f.name.lower()]
-            if matches:
-                tar_file = matches[0]
+            # Khớp số thứ tự chính xác (tránh lỗi substring giữa 1 và 10, 100)
+            m = re.search(r'\d+', img_file.name)
+            if m:
+                target_num = int(m.group(0))
+                exact_matches = [
+                    f for f in tar_p.glob('*') 
+                    if re.search(r'\d+', f.name) and int(re.search(r'\d+', f.name).group(0)) == target_num
+                ]
+                if exact_matches:
+                    tar_file = exact_matches[0]
+                else:
+                    continue
             else:
                 continue
 
@@ -224,9 +236,21 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
         restored_np = (restored_t.squeeze(0).permute(1, 2, 0).numpy() * 255.0).round() / 255.0
         tar_np = (tar_t.squeeze(0).permute(1, 2, 0).numpy() * 255.0).round() / 255.0
 
+        # Căn chỉnh chiều không gian nếu ảnh bị xoay hoặc lệch kích thước
+        if restored_np.shape[:2] != tar_np.shape[:2]:
+            if restored_np.shape[0] == tar_np.shape[1] and restored_np.shape[1] == tar_np.shape[0]:
+                tar_np = np.transpose(tar_np, (1, 0, 2))
+            else:
+                tar_np = cv2.resize(tar_np, (restored_np.shape[1], restored_np.shape[0]), interpolation=cv2.INTER_CUBIC)
+
         if use_y_channel:
             r_y = 0.257 * restored_np[:, :, 0] + 0.504 * restored_np[:, :, 1] + 0.098 * restored_np[:, :, 2] + 16.0 / 255.0
             t_y = 0.257 * tar_np[:, :, 0] + 0.504 * tar_np[:, :, 1] + 0.098 * tar_np[:, :, 2] + 16.0 / 255.0
+            if r_y.shape != t_y.shape:
+                if r_y.shape == t_y.shape[::-1]:
+                    t_y = t_y.T
+                else:
+                    t_y = cv2.resize(t_y, (r_y.shape[1], r_y.shape[0]), interpolation=cv2.INTER_CUBIC)
             psnr, ssim = compute_metrics(r_y, t_y)
         else:
             psnr, ssim = compute_metrics(restored_np, tar_np)
@@ -315,9 +339,10 @@ def main():
     for out_csv in target_csvs:
         out_csv.parent.mkdir(parents=True, exist_ok=True)
         file_exists = out_csv.exists()
-        with open(out_csv, 'w', newline='', encoding='utf-8') as f:
+        with open(out_csv, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['model', 'task', 'dataset', 'metric_psnr', 'metric_ssim', 'metric_lpips', 'num_images'])
-            writer.writeheader()
+            if not file_exists:
+                writer.writeheader()
             writer.writerows(all_results)
         print(f"Đã lưu kết quả đánh giá vào: {out_csv.resolve()}")
 
