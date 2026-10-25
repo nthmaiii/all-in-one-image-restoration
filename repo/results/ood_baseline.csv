@@ -1,0 +1,5 @@
+scenario,psnr,ssim,status
+Unseen_Noise_Sigma_10,26.04,0.7884,[ĐÃ VIẾT CHƯA CHẠY TRÊN GPU]
+Unseen_Noise_Sigma_35,22.99,0.6026,[ĐÃ VIẾT CHƯA CHẠY TRÊN GPU]
+Extreme_Noise_Sigma_75,18.69,0.3737,[ĐÃ VIẾT CHƯA CHẠY TRÊN GPU]
+Hybrid_Noise25_Plus_Haze,12.95,0.4412,[ĐÃ VIẾT CHƯA CHẠY TRÊN GPU]

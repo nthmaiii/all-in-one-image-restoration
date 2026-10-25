@@ -1,4 +1,4 @@
-# 1. Bỏ qua các folder tài liệu / code tải về hiện tại
+# 1. Bỏ qua các folder tài liệu / code tải về ban đầu
 Dataset-Metrix/
 paper2026/
 Toolbox/
@@ -13,6 +13,7 @@ survey/
 *.pdf
 *.pth
 *.pt
+*.ckpt
 *.onnx
 *.zip
 *.tar.gz
@@ -21,3 +22,12 @@ survey/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+/reading_cache/
+
+# 4. Bỏ qua công cụ và dữ liệu rà soát nội bộ ban đầu
+research_corpus_extracted.json
+research_identity_index.md
+research_inventory.json
+research_inventory.md
+research_repos_extracted.json
+research_tools/
