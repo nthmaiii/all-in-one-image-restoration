@@ -302,9 +302,16 @@ def run_experiment():
     print("=" * 70)
     verify_zero_leakage([train_path], [val_path], [test_path], near_dup_threshold=4, verbose=True)
 
-    # 3. Tạo thư mục lưu kết quả
+    # 3. Tạo thư mục lưu kết quả & Ghi nhận Git Commit HEAD
     run_dir = (REPO_ROOT / args.output_dir / f"branch_{args.branch}_seed_{args.seed}").resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import subprocess
+        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=str(REPO_ROOT)).decode().strip()
+    except Exception:
+        commit_hash = "UNKNOWN_OR_NO_GIT"
+    (run_dir / "git_commit.txt").write_text(commit_hash, encoding='utf-8')
+    print(f">> [AUDIT KHOA HỌC] Git Commit HEAD: {commit_hash}", flush=True)
 
     # 4. Khởi tạo mô hình
     weights_path = (REPO_ROOT / args.init_weights).resolve()
@@ -502,6 +509,7 @@ def run_experiment():
     summary_data = {
         'branch': args.branch,
         'seed': args.seed,
+        'git_commit': commit_hash,
         'total_iters': args.iters,
         'gpu_hours': gpu_hours,
         'iter_0_metrics': {'val': val_res_0, 'ood': ood_res_0},
