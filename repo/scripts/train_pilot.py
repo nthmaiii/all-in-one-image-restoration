@@ -26,6 +26,7 @@ from torchvision.transforms.functional import to_tensor
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'baselines' / 'promptir'))
 
 # -------------------------------------------------------------
@@ -46,9 +47,10 @@ class AiOIRPilotDataset(Dataset):
     def __len__(self):
         return len(self.image_paths) * (10 if self.is_train else 1)
 
-    def synthesize_degradation(self, clean_np):
+    def synthesize_degradation(self, clean_np, mode=None):
         """clean_np: float32 in [0, 1], shape (H, W, 3)"""
-        mode = random.randint(0, 3) if self.is_train else 3
+        if mode is None:
+            mode = random.randint(0, 3)
         h, w, c = clean_np.shape
 
         if mode == 0:
@@ -115,14 +117,16 @@ class AiOIRPilotDataset(Dataset):
         if self.is_train:
             top = random.randint(0, h - self.patch_size)
             left = random.randint(0, w - self.patch_size)
+            mode = random.randint(0, 3)
         else:
             top = (h - self.patch_size) // 2
             left = (w - self.patch_size) // 2
+            mode = real_idx % 4
 
         patch_clean = clean_np[top:top + self.patch_size, left:left + self.patch_size]
 
         # Sinh ảnh suy thoái
-        patch_degraded, tag = self.synthesize_degradation(patch_clean)
+        patch_degraded, tag = self.synthesize_degradation(patch_clean, mode=mode)
 
         tensor_clean = torch.from_numpy(patch_clean).permute(2, 0, 1).float()
         tensor_degraded = torch.from_numpy(patch_degraded).permute(2, 0, 1).float()
@@ -135,7 +139,17 @@ class AiOIRPilotDataset(Dataset):
 def build_model(model_name, init_weights=None, device='cuda'):
     m_name = model_name.lower().strip()
     if 'fd' in m_name:
-        from repo.src.models.fd_promptir import FDPromptIR
+        try:
+            from src.models.fd_promptir import FDPromptIR
+        except ImportError:
+            try:
+                from repo.src.models.fd_promptir import FDPromptIR
+            except ImportError:
+                import sys
+                from pathlib import Path
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+                from src.models.fd_promptir import FDPromptIR
+
         print("[MÔ HÌNH] Khởi tạo FD-PromptIR (Frequency-Decoupled Dynamic Prompting)...")
         model = FDPromptIR(decoder=True)
         if init_weights and Path(init_weights).exists():
