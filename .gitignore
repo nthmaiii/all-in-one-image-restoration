@@ -31,3 +31,15 @@ research_inventory.json
 research_inventory.md
 research_repos_extracted.json
 research_tools/
+
+# 5. Kế hoạch nghiên cứu, phân tích, giả thuyết & bài báo (BẢO MẬT NỘI BỘ - KHÔNG PUSH GIT)
+*.md
+!README.md
+analysis/
+repo/analysis/
+paper/
+repo/paper/
+PLAN_STATUS.md
+repo/PLAN_STATUS.md
+research_log.md
+repo/research_log.md

@@ -47,3 +47,12 @@ data/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Research Plans, Analysis, Hypotheses & Paper Drafts (STRICTLY CONFIDENTIAL)
+*.md
+!README.md
+!data/README.md
+analysis/
+paper/
+PLAN_STATUS.md
+research_log.md
