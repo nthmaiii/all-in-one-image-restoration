@@ -37,6 +37,24 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.leakage_checker import verify_zero_leakage
 from src.evaluation.unified_evaluator import UnifiedEvaluator, forward_padded
 
+def get_prompt_cosine_stats(model) -> str:
+    """Tính chỉ số Cosine Similarity thực tế (không nhân lambda) giữa các prompt tokens ở 3 cấp decoder."""
+    stats = []
+    for p_name in ['prompt1', 'prompt2', 'prompt3']:
+        p_block = getattr(model, p_name, None)
+        if p_block is None:
+            continue
+        bank = getattr(p_block, 'prompt_low', getattr(p_block, 'prompt_bank1', None))
+        if bank is not None:
+            N = bank.shape[1]
+            v = bank.squeeze(0).mean(dim=(-2, -1))
+            norm_v = F.normalize(v, p=2, dim=1)
+            gram = torch.mm(norm_v, norm_v.t())
+            off_diag = gram[~torch.eye(N, dtype=bool, device=bank.device)].abs()
+            stats.append(f"{off_diag.mean().item():.3f}")
+    return "/".join(stats) if stats else "N/A"
+
+
 def set_seed(seed: int = 42):
     """Khóa toàn bộ hạt giống ngẫu nhiên để bảo đảm khả năng tái lập 100%."""
     random.seed(seed)
@@ -341,7 +359,8 @@ def run_experiment():
         elapsed_step = time.perf_counter() - t_step
 
         if iter_count % 50 == 0 or iter_count == 1:
-            print(f"Iter [{iter_count:4d}/{args.iters}] | Recon Loss: {loss_recon.item():.4f} | Orth Loss: {loss_orth.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {elapsed_step:.2f}s")
+            cos_str = f" | Cos(L1/L2/L3): {get_prompt_cosine_stats(model)}" if args.branch in ['B', 'C'] else ""
+            print(f"Iter [{iter_count:4d}/{args.iters}] | Recon Loss: {loss_recon.item():.4f} | Orth Loss: {loss_orth.item():.4f}{cos_str} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {elapsed_step:.2f}s")
 
         # 7. Đánh giá Validation định kỳ
         if iter_count % args.val_freq == 0 or iter_count == args.iters:
