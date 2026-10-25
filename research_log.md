@@ -147,3 +147,21 @@
 - **Hybrid (Noise $\sigma=25$ + Haze)**: PSNR sụp đổ thảm họa xuống **16.79 dB** (mất cấu trúc hoàn toàn).
 - **Ý nghĩa khoa học**: Xác nhận chính xác điểm mù chí mạng của cơ chế prompt động / adapter trong AiOIR: khi gặp suy thoái hỗn hợp hoặc ngoài khoảng huấn luyện, prompt token bị xung đột biểu diễn (representation collision), không thể tổng hợp đặc trưng chính xác. Đây là cơ sở thực nghiệm vững chắc để xây dựng các Giả thuyết ở Phase P3!
 
+---
+
+### [2026-10-25 19:05] Hoàn Tất Phase P3: Sinh Giả Thuyết & Kiểm Tra Tính Mới
+
+#### 1. Đã thực hiện (P3-T1 & P3-T2):
+- Xây dựng 8 giả thuyết nghiên cứu giải quyết chính xác các điểm mù đo được từ log T4 (`repo/analysis/hypotheses.md`).
+- Tự phản biện theo tiêu chuẩn Reviewer 2 khắt khe: Loại bỏ 4 ý tưởng rủi ro cao (CLIP/LLM do vượt quá VRAM T4, Diffusion do thời gian huấn luyện quá lâu, MoE do mất cân bằng tải, Color Space do tính mới mỏng).
+- Giữ lại 4 ứng viên mạnh nhất:
+  - **H1 (FD-Prompt)**: Phân tách suy thoái theo miền tần số (Wavelet/Laplacian Prompting) trị dứt điểm sụp đổ suy thoái hỗn hợp.
+  - **H2 (CD-Route)**: Định tuyến suy thoái trên đa tạp phân phối liên tục giải quyết sụp đổ OOD ($\sigma=75$).
+  - **H1+H2 (Tích hợp)**: Kết hợp phân tách tần số với routing đa tạp.
+  - **H4 (OPR - Kế hoạch B)**: Ràng buộc trực giao hóa không gian Prompt (0 FLOPs overhead).
+
+#### 2. Kiểm tra tính mới (P3-T3):
+- So sánh chi tiết với 5 bài báo gần nhất (AirNet, PromptIR, AdaIR, InstructIR, Bi-level Routing) tại `repo/analysis/novelty_check.md`.
+- Xác nhận: Chưa có công trình nào kết hợp phân tách miền tần số trực giao với routing đa tạp liên tục trong dòng AiOIR. Ranh giới tính mới và đóng góp khoa học rõ ràng, tự tin hướng tới hội nghị top-tier.
+
+

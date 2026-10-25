@@ -18,11 +18,11 @@
 | **P2. Chẩn Đoán Thất Bại** | **P2-T1** | Phân tích sâu code vs paper (soft prompt lookup, FiLM modulation, progressive) | **ĐẠT** | `repo/analysis/paper_vs_code.md` | Chỉ ra 5 sai khác bản chất giữa code và bài báo |
 | | **P2-T2** | Tìm 30 ảnh lỗi tệ nhất mỗi tập, phân tích phổ 2D FFT, heatmap sai số | **ĐẠT (Code)** | `repo/scripts/diagnose_failures.py`, `analysis/failure_analysis.md`, figures | Phân loại tự động 3 kiểu lỗi: texture smoothing, color drift, residue |
 | | **P2-T3** | Thử thách OOD (sigma 10/35/75, suy thoái hỗn hợp nhiễu + sương mù) | **ĐẠT** | `repo/results/ood_baseline.csv` | Phát hiện 2 thất bại nghiêm trọng: $\sigma=75$ SSIM giảm còn 0.6378; Nhiễu+Sương mù PSNR sụp đổ còn 16.79 dB [ĐÃ XÁC NHẬN BẰNG LOG T4] |
-| | **GATE P2** | Duyệt failure_analysis.md và xác nhận thất bại đáng giải quyết | **SẴN SÀNG DUYỆT** | Xác nhận từ User | Chốt thất bại cốt lõi trước khi sang P3 |
-| **P3. Giả Thuyết & Tính Mới** | P3-T1 | Sinh 8-10 giả thuyết từ P2 theo định dạng 4 câu (a)-(d) | CHƯA LÀM | `repo/analysis/hypotheses.md` | Đủ 4 câu (a)-(d), đánh dấu ghép module |
-| | P3-T2 | Tự phản biện (Reviewer 2), rút gọn xuống 4-5 giả thuyết | CHƯA LÀM | `repo/analysis/hypotheses.md` | Nêu lý do từ chối mạnh nhất |
-| | P3-T3 | Kiểm tra tính mới (arXiv, Google Scholar), liệt kê 5 bài gần nhất | CHƯA LÀM | `repo/analysis/novelty_check.md` | Tránh trùng lặp với prior art |
-| | **GATE P3** | User chọn 1-2 giả thuyết đi tiếp kèm Kế hoạch B | CHƯA LÀM | Quyết định từ User | Bạn chọn, tôi không tự quyết |
+| | **GATE P2** | Duyệt failure_analysis.md và xác nhận thất bại đáng giải quyết | **ĐẠT** | Xác nhận từ User | Chốt thất bại cốt lõi [ĐÃ DUYỆT BỞI USER] |
+| **P3. Giả Thuyết & Tính Mới** | **P3-T1** | Sinh 8-10 giả thuyết từ P2 theo định dạng 4 câu (a)-(d) | **ĐẠT** | `repo/analysis/hypotheses.md` | Đủ 4 câu (a)-(d), gắn chặt với dữ liệu thất bại T4 [ĐÃ HOÀN TẤT] |
+| | **P3-T2** | Tự phản biện (Reviewer 2), rút gọn xuống 4-5 giả thuyết | **ĐẠT** | `repo/analysis/hypotheses.md` | Loại bỏ 4 ý tưởng rủi ro cao, giữ 4 giả thuyết cốt lõi [ĐÃ HOÀN TẤT] |
+| | **P3-T3** | Kiểm tra tính mới (arXiv, Google Scholar), liệt kê 5 bài gần nhất | **ĐẠT** | `repo/analysis/novelty_check.md` | So sánh chi tiết với AirNet, PromptIR, AdaIR, InstructIR [ĐÃ HOÀN TẤT] |
+| | **GATE P3** | User chọn 1-2 giả thuyết đi tiếp kèm Kế hoạch B | **CHỜ BẠN CHỌN** | Quyết định từ User | Bạn chọn, tôi không tự quyết |
 | **P4. Thí Nghiệm Thăm Dò** | P4-T1 | Thiết kế thí nghiệm tối thiểu (ngân sách nhỏ, đối chứng cùng ngân sách) | CHƯA LÀM | `repo/analysis/pilot_design.md` | Tiêu chí thắng/thua ghi trước khi chạy |
 | | P4-T2 | Cài đặt mô hình đề xuất trong `src/`, kiểm tra backward, FLOPs | CHƯA LÀM | `repo/src/` | Chạy thử 100 iteration không lỗi |
 | | P4-T3 | Notebook pilot có resume, huấn luyện và phân tích log | CHƯA LÀM | `repo/results/pilot_results.csv`, loss curve | Có tín hiệu tốt hơn hoặc bị bác bỏ rõ |
