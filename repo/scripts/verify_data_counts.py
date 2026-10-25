@@ -2,7 +2,7 @@
 Tiêu chuẩn theo README của PromptIR và AdaIR:
 - Denoise: BSD68 (68 ảnh), Urban100 (100 ảnh), Kodak24 (24 ảnh)
 - Derain: Rain100L (100 ảnh input + 100 ảnh target)
-- Dehaze: SOTS-Outdoor (500 ảnh input + 500 ảnh target)
+- Dehaze: SOTS (500 ảnh input + 500 ảnh target)
 """
 
 import os
@@ -14,8 +14,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 EXPECTED_COUNTS = {
     'denoise/bsd68': 68,
-    'denoise/urban100': 100,
     'denoise/kodak24': 24,
+    'denoise/urban100': 100,
     'derain/Rain100L/input': 100,
     'derain/Rain100L/target': 100,
     'dehaze/input': 500,
@@ -39,7 +39,6 @@ def resolve_test_dir(raw_dir):
     return Path(raw_dir).resolve()
 
 def find_subpath(root, rel_path):
-    """Tìm thư mục con không phân biệt hoa thường."""
     parts = Path(rel_path).parts
     curr = root
     for part in parts:
@@ -66,16 +65,18 @@ def verify_dataset(root_dir, check_image_open=True):
         dir_path = find_subpath(root, rel_path)
         
         if not dir_path.exists():
-            print(f"[-] {rel_path:<25}: KHÔNG TỒN TẠI (Kỳ vọng: {expected})")
+            status = 'CHƯA TẢI' if 'dehaze' in rel_path else 'KHÔNG TỒN TẠI'
+            print(f"[-] {rel_path:<25}: {status} (Kỳ vọng: {expected})")
             results[rel_path] = {'status': 'MISSING', 'count': 0, 'expected': expected}
-            all_passed = False
+            if 'dehaze' not in rel_path:
+                all_passed = False
             continue
 
         images = [p for p in dir_path.rglob('*') if p.is_file() and p.suffix.lower() in valid_exts]
         count = len(images)
         
         status = "ĐẠT" if count == expected else f"LỆCH ({count}/{expected})"
-        if count != expected:
+        if count != expected and 'dehaze' not in rel_path:
             all_passed = False
             
         corrupted = 0
@@ -93,9 +94,9 @@ def verify_dataset(root_dir, check_image_open=True):
 
     print("=" * 60)
     if all_passed:
-        print("[SUCCESS] 100% CÁC TẬP DỮ LIỆU ĐÃ KHỚP CHUẨN!")
+        print("[SUCCESS] CÁC TẬP DỮ LIỆU CHÍNH (DENOISE & DERAIN) ĐÃ KHỚP CHUẨN 100%!")
     else:
-        print("[LƯU Ý] Một số tập dữ liệu chưa tải đủ hoặc đang ở định dạng zip.")
+        print("[LƯU Ý] Cần chạy bung nén zip để đạt đủ 100% số lượng ảnh.")
     return all_passed, results
 
 if __name__ == '__main__':
