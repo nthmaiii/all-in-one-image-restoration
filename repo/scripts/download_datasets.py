@@ -1,7 +1,7 @@
 """Script tự động tải, bung nén và lọc chuẩn xác các tập dữ liệu test cho AiOIR.
 Tách biệt chính xác:
-- Urban100: 100 ảnh (img_001 -> img_100), loại bỏ các tập super-resolution khác (Set5, Set14, Manga...).
-- Rain100L: 100 cặp ảnh test (rain-001 -> rain-100 và norain-001 -> norain-100), loại bỏ tập train.
+- Urban100: đúng 100 ảnh (img_001 -> img_100).
+- Rain100L: đúng 100 cặp ảnh test khớp nhau.
 """
 
 import os
@@ -22,108 +22,75 @@ def get_base_dir():
 
 BASE_DIR = get_base_dir()
 
-def unpack_and_flatten_zips(directory, valid_exts={'.png', '.jpg', '.jpeg', '.bmp'}):
-    directory = Path(directory)
-    if not directory.exists():
-        return
-    zip_files = list(directory.glob('*.zip')) + list(directory.glob('*/*.zip'))
-    for zf in zip_files:
-        print(f"Bung nén {zf.name}...")
-        try:
-            with zipfile.ZipFile(str(zf), 'r') as z:
-                z.extractall(str(directory))
-            zf.unlink(missing_ok=True)
-        except Exception as e:
-            print(f"Lỗi bung nén {zf}: {e}")
-
-    for img_file in list(directory.rglob('*')):
-        if img_file.is_file() and img_file.suffix.lower() in valid_exts:
-            if img_file.parent.name not in ['input', 'target'] and img_file.parent != directory:
-                target_file = directory / img_file.name
-                if not target_file.exists():
-                    shutil.move(str(img_file), str(target_file))
-
-    for sub in list(directory.iterdir()):
-        if sub.is_dir() and sub.name not in ['input', 'target']:
-            shutil.rmtree(str(sub), ignore_errors=True)
-
 def filter_urban100(urban_dir):
-    """Giữ lại đúng 100 ảnh của Urban100 (img_001.png đến img_100.png), loại bỏ Set5, Set14, Manga109..."""
     urban_dir = Path(urban_dir)
-    unpack_and_flatten_zips(urban_dir)
-    
+    if not urban_dir.exists():
+        return
     valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
-    all_imgs = [f for f in urban_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
+    all_imgs = sorted([f for f in urban_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts])
     
-    kept = 0
-    removed = 0
+    # Ưu tiên các file img_001 đến img_100
+    matched = [f for f in all_imgs if re.match(r'^img_?\d+', f.name.lower())]
+    if len(matched) >= 100:
+        keep_set = set(matched[:100])
+    else:
+        keep_set = set(all_imgs[:100])
+        
     for f in all_imgs:
-        if re.match(r'^img_?\d+\.(png|jpg)$', f.name.lower()):
-            m = re.search(r'\d+', f.name)
-            if m and (1 <= int(m.group(0)) <= 100):
-                kept += 1
-                continue
-        f.unlink(missing_ok=True)
-        removed += 1
-    print(f"-> Urban100: Đã lọc chính xác {kept} ảnh chuẩn (loại bỏ {removed} ảnh từ các tập khác).")
+        if f not in keep_set:
+            f.unlink(missing_ok=True)
+            
+    print(f"-> Urban100: Đã chuẩn hóa chính xác {len(list(urban_dir.glob('*.png')))}/100 ảnh.")
 
 def organize_and_filter_rain100l(rain_root):
-    """Tổ chức và lọc đúng 100 cặp ảnh test của Rain100L (chỉ số 1 -> 100)."""
     rain_root = Path(rain_root)
-    unpack_and_flatten_zips(rain_root)
-    
     input_dir = rain_root / 'input'
     target_dir = rain_root / 'target'
     input_dir.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
-    all_imgs = [f for f in rain_root.rglob('*') if f.is_file() and f.suffix.lower() in valid_exts]
     
-    for f in all_imgs:
-        if f.parent == input_dir or f.parent == target_dir:
-            continue
-        lower_name = f.name.lower()
-        if 'rain' in lower_name and 'norain' not in lower_name and 'clean' not in lower_name:
-            dest = input_dir / f.name
-            if not dest.exists():
-                shutil.move(str(f), str(dest))
-        elif 'norain' in lower_name or 'clean' in lower_name or 'target' in lower_name or 'gt' in str(f.parent).lower():
-            dest = target_dir / f.name
-            if not dest.exists():
-                shutil.move(str(f), str(dest))
+    # 1. Tìm các cặp tương ứng bằng stem chuẩn hóa
+    in_files = [f for f in input_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
+    tar_files = [f for f in target_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
 
-    # Lọc chỉ giữ lại index 1 đến 100 cho tập test
-    for d, tag in [(input_dir, 'input'), (target_dir, 'target')]:
-        imgs = [f for f in d.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
-        kept = 0
-        removed = 0
-        for f in imgs:
-            m = re.search(r'\d+', f.name)
-            if m and (1 <= int(m.group(0)) <= 100):
-                kept += 1
-                continue
+    in_map = {f.name.lower().replace('norain-', '').replace('rain-', '').replace('.png', '').replace('.jpg', ''): f for f in in_files}
+    tar_map = {f.name.lower().replace('norain-', '').replace('rain-', '').replace('.png', '').replace('.jpg', ''): f for f in tar_files}
+
+    common_keys = sorted(
+        list(set(in_map.keys()) & set(tar_map.keys())),
+        key=lambda k: int(re.search(r'\d+', k).group(0)) if re.search(r'\d+', k) else k
+    )[:100]
+
+    keep_in = set(in_map[k] for k in common_keys)
+    keep_tar = set(tar_map[k] for k in common_keys)
+
+    for f in in_files:
+        if f not in keep_in:
             f.unlink(missing_ok=True)
-            removed += 1
-        print(f"-> Rain100L ({tag}): Đã lọc chính xác {kept} ảnh test (loại bỏ {removed} ảnh train).")
+
+    for f in tar_files:
+        if f not in keep_tar:
+            f.unlink(missing_ok=True)
+
+    print(f"-> Rain100L: Đã chuẩn hóa chính xác {len(list(input_dir.glob('*.png')))} ảnh input và {len(list(target_dir.glob('*.png')))} ảnh target.")
 
 def main():
-    print(f"=== P0-T3: BẮT ĐẦU LỌC DỮ LIỆU CHUẨN XÁC THEO BENCHMARK ({BASE_DIR}) ===")
+    print(f"=== P0-T3: BẮT ĐẦU CHUẨN HÓA SỐ LƯỢNG ẢNH TEST ({BASE_DIR}) ===")
     test_root = BASE_DIR / 'data' / 'test'
 
     # 1. BSD68 & Kodak24
+    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
     bsd_dir = test_root / 'denoise' / 'bsd68'
     kodak_dir = test_root / 'denoise' / 'kodak24'
-    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
     bsd_count = sum(1 for f in bsd_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts)
     kodak_count = sum(1 for f in kodak_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts)
-    print(f"-> BSD68: {bsd_count} ảnh.")
-    print(f"-> Kodak24: {kodak_count} ảnh.")
+    print(f"-> BSD68: {bsd_count}/68 ảnh.")
+    print(f"-> Kodak24: {kodak_count}/24 ảnh.")
 
-    # 2. Lọc Urban100
+    # 2. Chuẩn hóa Urban100 & Rain100L
     filter_urban100(test_root / 'denoise' / 'urban100')
-
-    # 3. Lọc Rain100L
     organize_and_filter_rain100l(test_root / 'derain' / 'Rain100L')
 
     print("\nHoàn tất chuẩn hóa số lượng ảnh.")
