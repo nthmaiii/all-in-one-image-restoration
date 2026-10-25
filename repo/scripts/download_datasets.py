@@ -1,12 +1,14 @@
-"""Script tự động tải và tổ chức các tập dữ liệu và checkpoint cho All-in-One Image Restoration (AiOIR).
-Sử dụng các Google Drive ID chính thức đã xác minh, tương thích tối đa với môi trường Google Colab.
+"""Script tự động tải, bung nén và lọc chuẩn xác các tập dữ liệu test cho AiOIR.
+Tách biệt chính xác:
+- Urban100: 100 ảnh (img_001 -> img_100), loại bỏ các tập super-resolution khác (Set5, Set14, Manga...).
+- Rain100L: 100 cặp ảnh test (rain-001 -> rain-100 và norain-001 -> norain-100), loại bỏ tập train.
 """
 
 import os
 import sys
+import re
 import shutil
 import zipfile
-import subprocess
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -24,10 +26,9 @@ def unpack_and_flatten_zips(directory, valid_exts={'.png', '.jpg', '.jpeg', '.bm
     directory = Path(directory)
     if not directory.exists():
         return
-    # Giải nén mọi file zip tìm thấy trong thư mục
     zip_files = list(directory.glob('*.zip')) + list(directory.glob('*/*.zip'))
     for zf in zip_files:
-        print(f"Bung nén {zf.name} vào {directory}...")
+        print(f"Bung nén {zf.name}...")
         try:
             with zipfile.ZipFile(str(zf), 'r') as z:
                 z.extractall(str(directory))
@@ -35,7 +36,6 @@ def unpack_and_flatten_zips(directory, valid_exts={'.png', '.jpg', '.jpeg', '.bm
         except Exception as e:
             print(f"Lỗi bung nén {zf}: {e}")
 
-    # Đưa các ảnh nằm trong thư mục con lồng nhau lên thư mục chính (trừ input/target)
     for img_file in list(directory.rglob('*')):
         if img_file.is_file() and img_file.suffix.lower() in valid_exts:
             if img_file.parent.name not in ['input', 'target'] and img_file.parent != directory:
@@ -43,12 +43,32 @@ def unpack_and_flatten_zips(directory, valid_exts={'.png', '.jpg', '.jpeg', '.bm
                 if not target_file.exists():
                     shutil.move(str(img_file), str(target_file))
 
-    # Xóa các thư mục con rỗng không phải input/target
     for sub in list(directory.iterdir()):
         if sub.is_dir() and sub.name not in ['input', 'target']:
             shutil.rmtree(str(sub), ignore_errors=True)
 
-def organize_rain100l(rain_root):
+def filter_urban100(urban_dir):
+    """Giữ lại đúng 100 ảnh của Urban100 (img_001.png đến img_100.png), loại bỏ Set5, Set14, Manga109..."""
+    urban_dir = Path(urban_dir)
+    unpack_and_flatten_zips(urban_dir)
+    
+    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
+    all_imgs = [f for f in urban_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
+    
+    kept = 0
+    removed = 0
+    for f in all_imgs:
+        if re.match(r'^img_?\d+\.(png|jpg)$', f.name.lower()):
+            m = re.search(r'\d+', f.name)
+            if m and (1 <= int(m.group(0)) <= 100):
+                kept += 1
+                continue
+        f.unlink(missing_ok=True)
+        removed += 1
+    print(f"-> Urban100: Đã lọc chính xác {kept} ảnh chuẩn (loại bỏ {removed} ảnh từ các tập khác).")
+
+def organize_and_filter_rain100l(rain_root):
+    """Tổ chức và lọc đúng 100 cặp ảnh test của Rain100L (chỉ số 1 -> 100)."""
     rain_root = Path(rain_root)
     unpack_and_flatten_zips(rain_root)
     
@@ -73,45 +93,40 @@ def organize_rain100l(rain_root):
             if not dest.exists():
                 shutil.move(str(f), str(dest))
 
-def count_images_in_dir(d_path):
-    if not d_path.exists():
-        return 0
-    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
-    return sum(1 for f in d_path.rglob('*') if f.is_file() and f.suffix.lower() in valid_exts)
+    # Lọc chỉ giữ lại index 1 đến 100 cho tập test
+    for d, tag in [(input_dir, 'input'), (target_dir, 'target')]:
+        imgs = [f for f in d.glob('*') if f.is_file() and f.suffix.lower() in valid_exts]
+        kept = 0
+        removed = 0
+        for f in imgs:
+            m = re.search(r'\d+', f.name)
+            if m and (1 <= int(m.group(0)) <= 100):
+                kept += 1
+                continue
+            f.unlink(missing_ok=True)
+            removed += 1
+        print(f"-> Rain100L ({tag}): Đã lọc chính xác {kept} ảnh test (loại bỏ {removed} ảnh train).")
 
 def main():
-    print(f"=== P0-T3: BẮT ĐẦU TỰ ĐỘNG BUNG NÉN & SẮP XẾP DỮ LIỆU ({BASE_DIR}) ===")
-
+    print(f"=== P0-T3: BẮT ĐẦU LỌC DỮ LIỆU CHUẨN XÁC THEO BENCHMARK ({BASE_DIR}) ===")
     test_root = BASE_DIR / 'data' / 'test'
-    test_root.mkdir(parents=True, exist_ok=True)
 
-    # 1. BSD68
+    # 1. BSD68 & Kodak24
     bsd_dir = test_root / 'denoise' / 'bsd68'
-    bsd_zip = test_root / 'denoise' / 'cbsd68.zip'
-    if bsd_zip.exists():
-        unpack_and_flatten_zips(bsd_dir)
-    print(f"-> BSD68: {count_images_in_dir(bsd_dir)} ảnh.")
-
-    # 2. Kodak24
     kodak_dir = test_root / 'denoise' / 'kodak24'
-    kodak_zip = test_root / 'denoise' / 'kodak24.zip'
-    if kodak_zip.exists():
-        unpack_and_flatten_zips(kodak_dir)
-    print(f"-> Kodak24: {count_images_in_dir(kodak_dir)} ảnh.")
+    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
+    bsd_count = sum(1 for f in bsd_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts)
+    kodak_count = sum(1 for f in kodak_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts)
+    print(f"-> BSD68: {bsd_count} ảnh.")
+    print(f"-> Kodak24: {kodak_count} ảnh.")
 
-    # 3. Urban100
-    urban_dir = test_root / 'denoise' / 'urban100'
-    unpack_and_flatten_zips(urban_dir)
-    print(f"-> Urban100: {count_images_in_dir(urban_dir)} ảnh.")
+    # 2. Lọc Urban100
+    filter_urban100(test_root / 'denoise' / 'urban100')
 
-    # 4. Rain100L
-    rain_dir = test_root / 'derain' / 'Rain100L'
-    organize_rain100l(rain_dir)
-    in_count = count_images_in_dir(rain_dir / 'input')
-    tar_count = count_images_in_dir(rain_dir / 'target')
-    print(f"-> Rain100L: {in_count} ảnh input, {tar_count} ảnh target.")
+    # 3. Lọc Rain100L
+    organize_and_filter_rain100l(test_root / 'derain' / 'Rain100L')
 
-    print("\nHoàn tất bung nén và sắp xếp dữ liệu.")
+    print("\nHoàn tất chuẩn hóa số lượng ảnh.")
 
 if __name__ == '__main__':
     main()
