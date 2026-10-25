@@ -22,11 +22,11 @@
 | **P3. Giả Thuyết & Tính Mới** | **P3-T1** | Sinh 8-10 giả thuyết từ P2 theo định dạng 4 câu (a)-(d) | **ĐẠT** | `repo/analysis/hypotheses.md` | Đủ 4 câu (a)-(d), gắn chặt với dữ liệu thất bại T4 [ĐÃ HOÀN TẤT] |
 | | **P3-T2** | Tự phản biện (Reviewer 2), rút gọn xuống 4-5 giả thuyết | **ĐẠT** | `repo/analysis/hypotheses.md` | Loại bỏ 4 ý tưởng rủi ro cao, giữ 4 giả thuyết cốt lõi [ĐÃ HOÀN TẤT] |
 | | **P3-T3** | Kiểm tra tính mới (arXiv, Google Scholar), liệt kê 5 bài gần nhất | **ĐẠT** | `repo/analysis/novelty_check.md` | So sánh chi tiết với AirNet, PromptIR, AdaIR, InstructIR [ĐÃ HOÀN TẤT] |
-| | **GATE P3** | User chọn 1-2 giả thuyết đi tiếp kèm Kế hoạch B | **CHỜ BẠN CHỌN** | Quyết định từ User | Bạn chọn, tôi không tự quyết |
-| **P4. Thí Nghiệm Thăm Dò** | P4-T1 | Thiết kế thí nghiệm tối thiểu (ngân sách nhỏ, đối chứng cùng ngân sách) | CHƯA LÀM | `repo/analysis/pilot_design.md` | Tiêu chí thắng/thua ghi trước khi chạy |
-| | P4-T2 | Cài đặt mô hình đề xuất trong `src/`, kiểm tra backward, FLOPs | CHƯA LÀM | `repo/src/` | Chạy thử 100 iteration không lỗi |
-| | P4-T3 | Notebook pilot có resume, huấn luyện và phân tích log | CHƯA LÀM | `repo/results/pilot_results.csv`, loss curve | Có tín hiệu tốt hơn hoặc bị bác bỏ rõ |
-| | **GATE P4** | Xác nhận tín hiệu khả quan hoặc rẽ nhánh Kế hoạch B | CHƯA LÀM | Xác nhận từ User | Ghi rõ kết quả âm nếu bị bác bỏ |
+| | **GATE P3** | User chọn 1-2 giả thuyết đi tiếp kèm Kế hoạch B | **ĐẠT** | Quyết định từ User | Đã chọn H1 (FD-Prompt) làm hướng chính, H4 (OPR) làm Kế hoạch B [ĐÃ PHÊ DUYỆT] |
+| **P4. Thí Nghiệm Thăm Dò** | **P4-T1** | Thiết kế thí nghiệm tối thiểu (ngân sách nhỏ, đối chứng cùng ngân sách) | **ĐẠT** | `repo/analysis/pilot_design.md` | Khóa trước tiêu chí thắng/thua, cùng 1,500 iter, batch 4, T4 GPU |
+| | **P4-T2** | Cài đặt mô hình đề xuất trong `src/`, kiểm tra backward, FLOPs | **ĐẠT** | `repo/src/models/fd_promptir.py` | Kiểm tra forward, backward, OPR loss, memory gradient ổn định |
+| | **P4-T3** | Notebook pilot có resume, huấn luyện và phân tích log | **ĐẠT (Sẵn sàng)** | `repo/scripts/train_pilot.py`, `repo/colab/02_pilot_experiment.ipynb` | Sẵn sàng chạy đối chứng PromptIR vs FD-PromptIR trên Colab T4 |
+| | **GATE P4** | Xác nhận tín hiệu khả quan hoặc rẽ nhánh Kế hoạch B | **CHỜ LOG COLAB** | `repo/results/pilot_results.csv` | Kiểm chứng vượt trội $\ge +7$ dB trên Hybrid hoặc rẽ nhánh |
 | **P5. Huấn Luyện Đầy Đủ** | P5-T1 | Cấu hình huấn luyện chính thức (chia chặng $\le 3$h, resume) | CHƯA LÀM | `repo/configs/train_main.yaml` | Cấu hình khóa cố định |
 | | P5-T2 | Huấn luyện đề xuất vs đối chứng cùng ngân sách (1-3 seeds) | CHƯA LÀM | `repo/runs/` | Chạy trên Colab với AMP |
 | | P5-T3 | Đánh giá đầy đủ trên toàn bộ các tập test | CHƯA LÀM | `repo/results/main_results.csv` | Vượt/ngang baseline có ý nghĩa |

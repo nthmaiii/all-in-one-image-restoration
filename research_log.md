@@ -164,4 +164,28 @@
 - So sánh chi tiết với 5 bài báo gần nhất (AirNet, PromptIR, AdaIR, InstructIR, Bi-level Routing) tại `repo/analysis/novelty_check.md`.
 - Xác nhận: Chưa có công trình nào kết hợp phân tách miền tần số trực giao với routing đa tạp liên tục trong dòng AiOIR. Ranh giới tính mới và đóng góp khoa học rõ ràng, tự tin hướng tới hội nghị top-tier.
 
+---
+
+### [2026-10-25 19:14] Hoàn Tất Thiết Kế & Triển Khai Thí Nghiệm Thăm Dò Phase P4 (P4-T1, P4-T2, P4-T3)
+
+#### 1. Quyết định chính thức GATE P3:
+- **Hướng chính**: Giả thuyết **H1 (Frequency-Decoupled Dynamic Prompting - FD-Prompt)**.
+- **Kế hoạch B (Module an toàn / Phụ trợ)**: Giả thuyết **H4 (Orthogonal Prompt Regularization - OPR)**.
+
+#### 2. Thiết kế thí nghiệm thăm dò (P4-T1):
+- Tài liệu hóa tại [`repo/analysis/pilot_design.md`](file:///d:/nckh_coChau/repo/analysis/pilot_design.md).
+- Ngân sách đối chứng: Cùng 1,500 iterations, cùng batch size 4, patch size 128x128, cùng warm-start từ `promptir_all.ckpt`, cùng learning rate $2 \times 10^{-4}$ cosine decay.
+- Tiêu chí thắng (Pass Gate P4): FD-PromptIR đạt $\Delta \text{PSNR} \ge +7.0$ dB trên suy thoái hỗn hợp (Noise+Haze) so với mức 16.79 dB của Baseline, và bảo toàn/cải thiện tác vụ đơn $\ge +0.2$ dB.
+
+#### 3. Cài đặt mô hình đề xuất FD-PromptIR (P4-T2):
+- Module [`repo/src/models/fd_promptir.py`](file:///d:/nckh_coChau/repo/src/models/fd_promptir.py):
+  - Khối `FDPromptGenBlock`: Phân tách tần số cao/thấp, trích xuất DC (mean) và AC (std dev), sinh prompt đa dải tần và hợp nhất tích hợp.
+  - Hàm mất mát trực giao `get_orthogonal_loss()` ép các prompt tokens độc lập tuyến tính, triệt tiêu xung đột biểu diễn (representation collision).
+  - Kiểm thử forward pass, backward pass, và tính toán loss trực giao hoạt động trơn tru.
+
+#### 4. Kịch bản huấn luyện & Notebook Colab Pilot (P4-T3):
+- Script huấn luyện [`repo/scripts/train_pilot.py`](file:///d:/nckh_coChau/repo/scripts/train_pilot.py): Tích hợp dataset sinh suy thoái trực tiếp (Gaussian Noise, Rain Streaks, Koschmieder Haze, Hybrid), AMP FP16, checkpointing (`best_model.pth`, `latest_checkpoint.pth`), và xuất kết quả vào `results/pilot_results.csv`.
+- Notebook Colab [`repo/colab/02_pilot_experiment.ipynb`](file:///d:/nckh_coChau/repo/colab/02_pilot_experiment.ipynb): Sẵn sàng thực thi 1-click trên Google Colab Free Tesla T4.
+
+
 
