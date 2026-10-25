@@ -5,6 +5,7 @@ và kiểm tra độ bền vững khi gặp suy thoái chưa từng thấy (OOD)
 
 import sys
 import os
+import re
 import argparse
 from pathlib import Path
 import numpy as np
@@ -152,10 +153,11 @@ def run_diagnostics(args):
 
     # 1. Quét tập dữ liệu kiểm thử
     data_dir = resolve_file_path(args.data_dir) or Path(args.data_dir)
+    base_test = data_dir if data_dir.name == 'test' else (data_dir / 'test' if (data_dir / 'test').exists() else data_dir)
     test_tasks = [
-        ('Denoise_BSD68', data_dir / 'test' / 'denoise' / 'bsd68'),
-        ('Derain_Rain100L', data_dir / 'test' / 'derain' / 'rain100l'),
-        ('Dehaze_SOTS', data_dir / 'test' / 'dehaze' / 'sots')
+        ('Denoise_BSD68', base_test / 'denoise' / 'bsd68'),
+        ('Derain_Rain100L', base_test / 'derain' / 'Rain100L'),
+        ('Dehaze_SOTS', base_test / 'dehaze' / 'sots')
     ]
 
     all_analysis_records = []
@@ -173,26 +175,42 @@ def run_diagnostics(args):
             print(f"Bỏ qua {task_name}: Thư mục không tồn tại ({task_path})")
             continue
 
-        print(f"\n--- Đang xử lý phân tích lỗi cho: {task_name} ---")
-        img_files = sorted(list(task_path.glob('*.png')) + list(task_path.glob('*.jpg')))
+        print(f"\n--- Đang xử lý phân tích lỗi cho: {task_name} ({task_path}) ---")
+        
+        is_paired_dir = (task_path / 'input').exists() and (task_path / 'target').exists()
+        if is_paired_dir:
+            img_files = sorted(list((task_path / 'input').glob('*.png')) + list((task_path / 'input').glob('*.jpg')))
+        else:
+            img_files = sorted(list(task_path.glob('*.png')) + list(task_path.glob('*.jpg')))
         
         task_results = []
         for img_p in img_files[:args.max_samples]:
-            clean_bgr = cv2.imread(str(img_p))
-            if clean_bgr is None:
-                continue
-
-            if 'Denoise' in task_name:
-                noise = np.random.normal(0, 50, clean_bgr.shape).astype(np.float32)
-                degraded_bgr = np.clip(clean_bgr.astype(np.float32) + noise, 0, 255).astype(np.uint8)
-            elif 'Derain' in task_name:
-                degraded_bgr = clean_bgr.copy()
+            if is_paired_dir:
+                degraded_bgr = cv2.imread(str(img_p))
+                # Tìm file target tương ứng
+                tar_file = task_path / 'target' / img_p.name
+                if not tar_file.exists():
+                    m = re.search(r'\d+', img_p.name)
+                    if m:
+                        t_num = int(m.group(0))
+                        matches = [f for f in (task_path / 'target').glob('*') if re.search(r'\d+', f.name) and int(re.search(r'\d+', f.name).group(0)) == t_num]
+                        if matches:
+                            tar_file = matches[0]
+                clean_bgr = cv2.imread(str(tar_file)) if tar_file.exists() else degraded_bgr.copy()
             else:
-                t = 0.5
-                A = 220
-                degraded_bgr = np.clip(clean_bgr.astype(np.float32) * t + A * (1 - t), 0, 255).astype(np.uint8)
+                clean_bgr = cv2.imread(str(img_p))
+                if clean_bgr is None:
+                    continue
+                if 'Denoise' in task_name:
+                    noise = np.random.normal(0, 50, clean_bgr.shape).astype(np.float32)
+                    degraded_bgr = np.clip(clean_bgr.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+                else:
+                    t = 0.5
+                    A = 220
+                    degraded_bgr = np.clip(clean_bgr.astype(np.float32) * t + A * (1 - t), 0, 255).astype(np.uint8)
 
-            if model is not None:
+            if clean_bgr is None or degraded_bgr is None:
+                continue
                 inp = torch.from_numpy(degraded_bgr).permute(2, 0, 1).float().unsqueeze(0) / 255.0
                 with torch.no_grad():
                     out = forward_padded(model, inp.to(device), factor=64)
