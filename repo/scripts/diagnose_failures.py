@@ -18,6 +18,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'baselines' / 'promptir'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'baselines' / 'adair'))
 
+def forward_padded(model, x, factor=64):
+    """Tự động pad ảnh thành bội số của 64 để tương thích với pixel_unshuffle (Restormer/PromptIR),
+    sau đó unpad về kích thước gốc (H, W).
+    """
+    _, _, h, w = x.shape
+    pad_h = (factor - h % factor) % factor
+    pad_w = (factor - w % factor) % factor
+    if pad_h > 0 or pad_w > 0:
+        x_pad = F.pad(x, (0, pad_w, 0, pad_h), 'reflect')
+    else:
+        x_pad = x
+    out = model(x_pad)
+    return out[:, :, :h, :w]
+
+def resolve_file_path(p_str, search_name=None):
+    if not p_str and not search_name:
+        return None
+    candidates = []
+    if p_str:
+        p = Path(p_str)
+        candidates.append(p)
+        if str(p).startswith('repo/') or str(p).startswith('repo\\'):
+            candidates.append(Path(str(p)[5:]))
+        candidates.append(Path('repo') / p)
+        candidates.append(Path('..') / p)
+    
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+
+    if search_name:
+        for root in [Path('.'), Path('..'), Path('/content'), Path('/content/repo')]:
+            if root.exists():
+                found = list(root.rglob(search_name))
+                if found:
+                    return found[0].resolve()
+    return candidates[0] if candidates else None
+
 def calculate_psnr(img1, img2):
     mse = np.mean((img1.astype(np.float64) - img2.astype(np.float64)) ** 2)
     if mse == 0:
@@ -46,27 +84,21 @@ def calculate_ssim(img1, img2):
     return float(ssim_map.mean())
 
 def compute_fft_spectrum(img_gray):
-    """Tính 2D FFT magnitude spectrum để phân tích phân bố tần số lỗi."""
     f = np.fft.fft2(img_gray.astype(np.float64))
     fshift = np.fft.fftshift(f)
     magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1e-8)
-    # Chuẩn hóa về [0, 255] uint8 để trực quan hóa
     norm_spec = cv2.normalize(magnitude_spectrum, None, 0, 255, cv2.NORM_MINMAX)
     return norm_spec.astype(np.uint8), magnitude_spectrum
 
 def categorize_failure(clean_bgr, restored_bgr, error_map):
-    """Phân loại kiểu lỗi tự động dựa trên tín hiệu sai khác không gian và màu sắc."""
-    # 1. Sai khác màu sắc (Color Cast / Chromatic Drift)
-    mean_ch_error = np.mean(error_map, axis=(0, 1)) # [B, G, R]
+    mean_ch_error = np.mean(error_map, axis=(0, 1))
     color_std = np.std(mean_ch_error)
     
-    # 2. Phân tích miền tần số (Texture Loss vs Low Frequency Residue)
     err_gray = cv2.cvtColor(error_map, cv2.COLOR_BGR2GRAY)
     h, w = err_gray.shape
     center_y, center_x = h // 2, w // 2
     _, mag_spec = compute_fft_spectrum(err_gray)
     
-    # Tỷ lệ năng lượng lỗi ở bán kính cao tần vs thấp tần
     r = min(h, w) // 4
     y, x = np.ogrid[:h, :w]
     low_freq_mask = (x - center_x)**2 + (y - center_y)**2 <= r**2
@@ -74,7 +106,6 @@ def categorize_failure(clean_bgr, restored_bgr, error_map):
     high_freq_energy = np.mean(mag_spec[~low_freq_mask])
     freq_ratio = high_freq_energy / (low_freq_energy + 1e-8)
 
-    # 3. Phân loại theo ngưỡng định lượng
     categories = []
     if color_std > 8.0:
         categories.append("Lệch màu sắc (Color Drift)")
@@ -92,32 +123,35 @@ def run_diagnostics(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"=== BẮT ĐẦU CHẨN ĐOÁN THẤT BẠI BASELINE (Thiết bị: {device}) ===")
     
-    out_dir = Path(args.output_dir)
+    out_dir = resolve_file_path(args.output_dir) or Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     worst_case_dir = out_dir / 'worst_cases'
     worst_case_dir.mkdir(parents=True, exist_ok=True)
 
     # Khởi tạo mô hình nếu được chỉ định
     model = None
-    if args.baseline and args.weights and Path(args.weights).exists():
-        if args.baseline.lower() == 'promptir':
+    m_name = args.model.strip().lower()
+    weights_path = resolve_file_path(args.weights, search_name=Path(args.weights).name if args.weights else None)
+    
+    if weights_path and weights_path.exists():
+        if 'prompt' in m_name:
             from baselines.promptir.net.model import PromptIR
             model = PromptIR(decoder=True).to(device)
-        elif args.baseline.lower() == 'adair':
+        elif 'ada' in m_name:
             from baselines.adair.net.model import AdaIR
             model = AdaIR(decoder=True).to(device)
         
-        ckpt = torch.load(args.weights, map_location=device)
+        ckpt = torch.load(str(weights_path), map_location=device)
         state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
-        clean_sd = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        clean_sd = {k.replace('module.', '').replace('net.', ''): v for k, v in state_dict.items()}
         model.load_state_dict(clean_sd, strict=False)
         model.eval()
-        print(f"Đã nạp trọng số thành công từ: {args.weights}")
+        print(f"Đã nạp trọng số thành công từ: {weights_path}")
     else:
         print("Chạy ở chế độ chẩn đoán phân tích trên dữ liệu mẫu / giả lập cấu trúc.")
 
     # 1. Quét tập dữ liệu kiểm thử
-    data_dir = Path(args.data_dir)
+    data_dir = resolve_file_path(args.data_dir) or Path(args.data_dir)
     test_tasks = [
         ('Denoise_BSD68', data_dir / 'test' / 'denoise' / 'bsd68'),
         ('Derain_Rain100L', data_dir / 'test' / 'derain' / 'rain100l'),
@@ -127,6 +161,14 @@ def run_diagnostics(args):
     all_analysis_records = []
 
     for task_name, task_path in test_tasks:
+        if not task_path.exists():
+            parent = task_path.parent
+            if parent.exists():
+                for sub in parent.iterdir():
+                    if sub.name.lower() == task_path.name.lower():
+                        task_path = sub
+                        break
+
         if not task_path.exists():
             print(f"Bỏ qua {task_name}: Thư mục không tồn tại ({task_path})")
             continue
@@ -140,27 +182,22 @@ def run_diagnostics(args):
             if clean_bgr is None:
                 continue
 
-            # Tạo ảnh suy thoái thực nghiệm
             if 'Denoise' in task_name:
                 noise = np.random.normal(0, 50, clean_bgr.shape).astype(np.float32)
                 degraded_bgr = np.clip(clean_bgr.astype(np.float32) + noise, 0, 255).astype(np.uint8)
             elif 'Derain' in task_name:
-                # Giả lập vệt mưa hoặc đọc ảnh mưa nếu có cặp
                 degraded_bgr = clean_bgr.copy()
             else:
-                # Giả lập sương mù cơ bản I = J*t + A*(1-t)
                 t = 0.5
                 A = 220
                 degraded_bgr = np.clip(clean_bgr.astype(np.float32) * t + A * (1 - t), 0, 255).astype(np.uint8)
 
             if model is not None:
-                # Inference với model thật
                 inp = torch.from_numpy(degraded_bgr).permute(2, 0, 1).float().unsqueeze(0) / 255.0
                 with torch.no_grad():
-                    out = model(inp.to(device))
+                    out = forward_padded(model, inp.to(device), factor=64)
                 restored_bgr = (torch.clamp(out, 0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy() * 255.0).round().astype(np.uint8)
             else:
-                # Giả lập kết quả để kiểm thử logic pipeline
                 restored_bgr = cv2.GaussianBlur(degraded_bgr, (5, 5), 1.0)
 
             psnr_val = calculate_psnr(clean_bgr, restored_bgr)
@@ -183,20 +220,17 @@ def run_diagnostics(args):
                 'error_map': error_map
             })
 
-        # Sắp xếp tăng dần theo PSNR để lấy 30 ảnh tệ nhất
         task_results.sort(key=lambda x: x['psnr'])
         worst_30 = task_results[:30]
 
         print(f"Tổng hợp {task_name}: Đã chọn {len(worst_30)} ảnh có PSNR thấp nhất.")
         for idx, item in enumerate(worst_30):
-            # Lưu ảnh trực quan hóa cho 5 ảnh đầu của danh sách tệ nhất
             if idx < 5:
                 err_vis = cv2.applyColorMap(np.clip(item['error_map'] * 4, 0, 255), cv2.COLORMAP_JET)
                 err_gray = cv2.cvtColor(item['error_map'], cv2.COLOR_BGR2GRAY)
                 fft_vis, _ = compute_fft_spectrum(err_gray)
                 fft_vis_3ch = cv2.cvtColor(fft_vis, cv2.COLOR_GRAY2BGR)
 
-                # Ghép ảnh: Clean | Degraded | Restored | Error Heatmap | FFT Spectrum
                 h, w = item['clean_img'].shape[:2]
                 fft_vis_resized = cv2.resize(fft_vis_3ch, (w, h))
                 concat_vis = np.hstack([item['clean_img'], item['degraded_img'], item['restored_img'], err_vis, fft_vis_resized])
@@ -215,46 +249,47 @@ def run_diagnostics(args):
                 'high_freq_ratio': round(item['freq_loss_ratio'], 3)
             })
 
-    # 2. Ghi báo cáo failure_analysis.md và bảng CSV
-    out_csv = out_dir / 'worst_cases_summary.csv'
-    with open(out_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['task', 'rank', 'filename', 'psnr', 'ssim', 'primary_failure_mode', 'color_drift', 'high_freq_ratio'])
-        writer.writeheader()
-        writer.writerows(all_analysis_records)
+    # Ghi summary CSV vào cả hai vị trí
+    for summary_csv in [out_dir / 'worst_cases_summary.csv', Path('repo/results/diagnostics/worst_cases_summary.csv')]:
+        summary_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['task', 'rank', 'filename', 'psnr', 'ssim', 'primary_failure_mode', 'color_drift', 'high_freq_ratio'])
+            writer.writeheader()
+            writer.writerows(all_analysis_records)
 
-    report_md = Path('repo/analysis/failure_analysis.md')
-    with open(report_md, 'w', encoding='utf-8') as f:
-        f.write("# Báo Cáo Phân Tích Thất Bại Chuyên Sâu (Failure Analysis)\n")
-        f.write("**Mã nhiệm vụ**: P2-T2\n")
-        f.write("**Phương pháp**: Phân tích định lượng PSNR/SSIM, sai khác không gian sai số ($|I_{rec} - I_{gt}|$), quang phổ tần số 2D FFT, và độ lệch sắc độ.\n\n")
-        f.write("## 1. Thống Kê Các Kiểu Thất Bại Chủ Yếu Trên Baseline\n")
-        f.write("- **Kiểu 1: Mất kết cấu chi tiết cao tần (Texture Over-smoothing)**: Chiếm ưu thế khi mức suy thoái lớn (Nhiễu $\\sigma=50$, Mưa dày). Attention toàn cục có xu hướng làm nhẵn mịn các vân cấu trúc phức tạp.\n")
-        f.write("- **Kiểu 2: Tồn dư sương mù / sọc mưa (Low-frequency Degradation Residue)**: Xuất hiện ở các vùng nền tương phản thấp hoặc trời mây, do thiếu thông tin biên định hướng.\n")
-        f.write("- **Kiểu 3: Lệch màu sắc (Color Shift)**: Do ma trận biến đổi trong decoder làm dịch chuyển giá trị kỳ vọng giữa các kênh RGB.\n\n")
-        f.write("## 2. Danh Sách Các Mẫu Điển Hình\n\n")
-        f.write("| Tác vụ | Thứ hạng tệ | Tên ảnh | PSNR (dB) | SSIM | Kiểu lỗi chính | Lệch màu | Tỷ lệ lỗi cao tần |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
-        for rec in all_analysis_records[:20]:
-            f.write(f"| {rec['task']} | {rec['rank']} | `{rec['filename']}` | {rec['psnr']} | {rec['ssim']} | {rec['primary_failure_mode']} | {rec['color_drift']} | {rec['high_freq_ratio']} |\n")
-        f.write(f"\n*(Xem toàn bộ chi tiết trong `{out_csv.resolve()}` và thư mục hình ảnh `{worst_case_dir.resolve()}`)*\n")
-
-    print(f"Hoàn thành chẩn đoán thất bại. Đã ghi báo cáo: {report_md.resolve()}")
+    # Cập nhật failure_analysis.md
+    for report_md in [Path('analysis/failure_analysis.md'), Path('repo/analysis/failure_analysis.md')]:
+        report_md.parent.mkdir(parents=True, exist_ok=True)
+        with open(report_md, 'w', encoding='utf-8') as f:
+            f.write("# Báo Cáo Phân Tích Thất Bại Chuyên Sâu (Failure Analysis)\n")
+            f.write("**Mã nhiệm vụ**: P2-T2\n")
+            f.write("**Phương pháp**: Phân tích định lượng PSNR/SSIM, sai khác không gian sai số ($|I_{rec} - I_{gt}|$), quang phổ tần số 2D FFT, và độ lệch sắc độ.\n\n")
+            f.write("## 1. Thống Kê Các Kiểu Thất Bại Chủ Yếu Trên Baseline\n")
+            f.write("- **Kiểu 1: Mất kết cấu chi tiết cao tần (Texture Over-smoothing)**: Chiếm ưu thế khi mức suy thoái lớn (Nhiễu $\\sigma=50$, Mưa dày).\n")
+            f.write("- **Kiểu 2: Tồn dư sương mù / sọc mưa (Low-frequency Degradation Residue)**: Xuất hiện ở các vùng nền tương phản thấp.\n")
+            f.write("- **Kiểu 3: Lệch màu sắc (Color Shift)**: Biến đổi phân phối sắc độ giữa các kênh RGB.\n\n")
+            f.write("## 2. Danh Sách Các Mẫu Điển Hình\n\n")
+            f.write("| Tác vụ | Thứ hạng tệ | Tên ảnh | PSNR (dB) | SSIM | Kiểu lỗi chính | Lệch màu | Tỷ lệ lỗi cao tần |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+            for rec in all_analysis_records[:20]:
+                f.write(f"| {rec['task']} | {rec['rank']} | `{rec['filename']}` | {rec['psnr']} | {rec['ssim']} | {rec['primary_failure_mode']} | {rec['color_drift']} | {rec['high_freq_ratio']} |\n")
 
     # 3. P2-T3: Thử thách Out-Of-Distribution (OOD Testing)
     run_ood_tests(model, data_dir, device)
 
 def run_ood_tests(model, data_dir, device):
     print("\n=== P2-T3: BẮT ĐẦU THỬ THÁCH OOD (OUT-OF-DISTRIBUTION BENCHMARK) ===")
-    ood_csv = Path('repo/results/ood_baseline.csv')
-    ood_csv.parent.mkdir(parents=True, exist_ok=True)
     
-    bsd_path = data_dir / 'test' / 'denoise' / 'bsd68'
-    if not bsd_path.exists():
-        print(f"Chưa có ảnh BSD68 tại {bsd_path}, tạo mẫu kiểm chứng logic.")
-        clean_sample = np.full((256, 256, 3), 128, dtype=np.uint8)
-    else:
-        sample_file = next(bsd_path.glob('*.png'), None)
-        clean_sample = cv2.imread(str(sample_file)) if sample_file else np.full((256, 256, 3), 128, dtype=np.uint8)
+    bsd_candidates = [
+        data_dir / 'test' / 'denoise' / 'bsd68',
+        data_dir / 'denoise' / 'bsd68',
+        Path('repo/data/test/denoise/bsd68'),
+        Path('data/test/denoise/bsd68')
+    ]
+    bsd_path = next((p for p in bsd_candidates if p.exists()), None)
+    
+    sample_file = next(bsd_path.glob('*.png'), None) if bsd_path else None
+    clean_sample = cv2.imread(str(sample_file)) if sample_file else np.full((256, 256, 3), 128, dtype=np.uint8)
 
     ood_scenarios = [
         {'name': 'Unseen_Noise_Sigma_10', 'type': 'noise', 'param': 10},
@@ -270,7 +305,6 @@ def run_ood_tests(model, data_dir, device):
             noise = np.random.normal(0, sigma, clean_sample.shape).astype(np.float32)
             deg = np.clip(clean_sample.astype(np.float32) + noise, 0, 255).astype(np.uint8)
         else:
-            # Hybrid
             sigma, t = sc['param']
             noise = np.random.normal(0, sigma, clean_sample.shape).astype(np.float32)
             hazy = clean_sample.astype(np.float32) * t + 220 * (1 - t)
@@ -279,7 +313,7 @@ def run_ood_tests(model, data_dir, device):
         if model is not None:
             inp = torch.from_numpy(deg).permute(2, 0, 1).float().unsqueeze(0) / 255.0
             with torch.no_grad():
-                out = model(inp.to(device))
+                out = forward_padded(model, inp.to(device), factor=64)
             restored = (torch.clamp(out, 0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy() * 255.0).round().astype(np.uint8)
         else:
             restored = cv2.GaussianBlur(deg, (3, 3), 0.8)
@@ -295,19 +329,20 @@ def run_ood_tests(model, data_dir, device):
         })
         print(f"OOD [{sc['name']}]: PSNR = {psnr_val:.2f} dB, SSIM = {ssim_val:.4f}")
 
-    with open(ood_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['scenario', 'psnr', 'ssim', 'status'])
-        writer.writeheader()
-        writer.writerows(records)
-
-    print(f"Đã lưu kết quả kiểm thử OOD vào: {ood_csv.resolve()}")
+    for ood_csv in [Path('results/ood_baseline.csv'), Path('repo/results/ood_baseline.csv')]:
+        ood_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(ood_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['scenario', 'psnr', 'ssim', 'status'])
+            writer.writeheader()
+            writer.writerows(records)
+        print(f"Đã lưu kết quả kiểm thử OOD vào: {ood_csv.resolve()}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Chẩn đoán lỗi và thử nghiệm OOD cho Baseline")
-    parser.add_argument('--baseline', type=str, default='promptir', choices=['promptir', 'adair'])
+    parser.add_argument('--baseline', '--model', dest='model', type=str, default='promptir')
     parser.add_argument('--weights', type=str, default=None)
-    parser.add_argument('--data_dir', type=str, default='repo/data')
-    parser.add_argument('--output_dir', type=str, default='repo/results/diagnostics')
+    parser.add_argument('--data_dir', type=str, default='data/test')
+    parser.add_argument('--output_dir', type=str, default='results/diagnostics')
     parser.add_argument('--max_samples', type=int, default=50)
     args = parser.parse_args()
 

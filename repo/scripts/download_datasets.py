@@ -10,53 +10,71 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+def get_base_dir():
+    # Nếu đang đứng trong thư mục repo (có scripts và baselines)
+    if Path('scripts').exists() and Path('baselines').exists():
+        return Path('.')
+    elif Path('repo').exists():
+        return Path('repo')
+    return Path('.')
+
+BASE_DIR = get_base_dir()
+
 GDRIVE_RESOURCES = {
     # 1. Trọng số mô hình đã huấn luyện (Pretrained Weights)
     'promptir_weights': {
         'id': '1j-b5Od70pGF7oaCqKAfUzmf-N-xEAjYl',
-        'target': 'repo/baselines/weights/promptir_all.ckpt',
+        'rel_target': 'baselines/weights/promptir_all.ckpt',
         'is_folder': False,
         'desc': 'PromptIR All-in-One Checkpoint (All.ckpt, ~140MB)'
     },
     'adair_weights': {
         'id': '1x2LN4kWkO3S65jJlH-1INUFiYt8KFzPH',
-        'target': 'repo/baselines/weights/adair',
+        'rel_target': 'baselines/weights/adair',
         'is_folder': True,
         'desc': 'AdaIR Pretrained Checkpoints Folder'
     },
     # 2. Tập dữ liệu kiểm chuẩn (Benchmark Test Sets)
     'kodak24': {
         'id': '1F4_mv4oTXhiG-zyG9DI4OO05KqvEKhs9',
-        'target': 'repo/data/test/denoise/kodak24.zip',
+        'rel_target': 'data/test/denoise/kodak24.zip',
         'is_folder': False,
-        'unzip_to': 'repo/data/test/denoise/kodak24',
+        'unzip_to': 'data/test/denoise/kodak24',
         'desc': 'Kodak24 Denoising Testset (24 ảnh)'
     },
     'cbsd68': {
         'id': '1lxXQ_buMll_JVWxKpk5fp0jduW5F_MHe',
-        'target': 'repo/data/test/denoise/cbsd68.zip',
+        'rel_target': 'data/test/denoise/cbsd68.zip',
         'is_folder': False,
-        'unzip_to': 'repo/data/test/denoise/bsd68',
+        'unzip_to': 'data/test/denoise/bsd68',
         'desc': 'CBSD68 Denoising Testset (68 ảnh)'
     },
     'urban100': {
         'id': '1B3DJGQKB6eNdwuQIhdskA64qUuVKLZ9u',
-        'target': 'repo/data/test/denoise/urban100',
+        'rel_target': 'data/test/denoise/urban100',
         'is_folder': True,
         'desc': 'Urban100 Denoising Testset (100 ảnh)'
     },
     'rain100l': {
         'id': '1-_Tw-LHJF4vh8fpogKgZx1EQ9MhsJI_f',
-        'target': 'repo/data/test/derain/Rain100L',
+        'rel_target': 'data/test/derain/Rain100L',
         'is_folder': True,
         'desc': 'Rain100L Deraining Testset (100 cặp)'
     }
 }
 
 def download_item(item_key, item_cfg):
-    target = Path(item_cfg['target'])
+    target = (BASE_DIR / item_cfg['rel_target']).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     
+    # Kiểm tra xem file đã tồn tại ở target hoặc ở thư mục repo lồng nhau không
+    alt_target = Path('repo') / item_cfg['rel_target']
+    if alt_target.exists() and not target.exists():
+        if alt_target.is_file():
+            shutil.copy(alt_target, target)
+        elif alt_target.is_dir():
+            shutil.copytree(alt_target, target, dirs_exist_ok=True)
+
     if target.exists():
         if target.is_dir() and any(target.iterdir()):
             print(f"[ĐÃ CÓ] {item_cfg['desc']} tại {target}")
@@ -82,7 +100,7 @@ def download_item(item_key, item_cfg):
     # Tự động giải nén nếu là file zip
     if 'unzip_to' in item_cfg and target.suffix == '.zip' and target.exists():
         import zipfile
-        unzip_path = Path(item_cfg['unzip_to'])
+        unzip_path = (BASE_DIR / item_cfg['unzip_to']).resolve()
         unzip_path.mkdir(parents=True, exist_ok=True)
         print(f"Đang giải nén {target} -> {unzip_path}...")
         try:
@@ -99,11 +117,11 @@ def main():
     parser.add_argument('--data_only', action='store_true')
     args = parser.parse_args()
 
-    print("=== P0-T3: BẮT ĐẦU TẢI DỮ LIỆU & CHECKPOINT TỰ ĐỘNG ===")
+    print(f"=== P0-T3: BẮT ĐẦU TẢI DỮ LIỆU & CHECKPOINT (Thư mục gốc: {BASE_DIR.resolve()}) ===")
 
     # 1. BSD68 nội bộ nếu có
     local_bsd = Path('CNN GAN/DnCNN/testsets/BSD68')
-    target_bsd = Path('repo/data/test/denoise/bsd68')
+    target_bsd = (BASE_DIR / 'data/test/denoise/bsd68').resolve()
     if local_bsd.exists() and len(list(local_bsd.glob('*.png'))) == 68:
         target_bsd.mkdir(parents=True, exist_ok=True)
         if len(list(target_bsd.glob('*.png'))) < 68:

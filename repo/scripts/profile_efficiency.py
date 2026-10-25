@@ -89,15 +89,15 @@ def main():
     if torch.cuda.is_available():
         results.append(profile_model('AdaIR', m_adair, input_size=(3, 256, 256)))
     
-    out_csv = Path('repo/results/efficiency.csv')
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(out_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['model', 'input_size', 'params_m', 'gflops', 'latency_ms', 'peak_vram_mb', 'device'])
-        writer.writeheader()
-        writer.writerows(results)
-        
-    print(f"Đã lưu kết quả hiệu năng vào: {out_csv.resolve()}")
+    # Lưu vào cả results/ và repo/results/ để tránh lệch đường dẫn
+    target_csvs = [Path('results/efficiency.csv'), Path('repo/results/efficiency.csv')]
+    for out_csv in target_csvs:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['model', 'input_size', 'params_m', 'gflops', 'latency_ms', 'peak_vram_mb', 'device'])
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"Đã lưu kết quả hiệu năng vào: {out_csv.resolve()}")
 
 if __name__ == '__main__':
     main()
