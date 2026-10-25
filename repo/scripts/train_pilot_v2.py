@@ -37,22 +37,41 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.leakage_checker import verify_zero_leakage
 from src.evaluation.unified_evaluator import UnifiedEvaluator, forward_padded
 
-def get_prompt_cosine_stats(model) -> str:
-    """Tính chỉ số Cosine Similarity thực tế (không nhân lambda) giữa các prompt tokens ở 3 cấp decoder."""
-    stats = []
+def get_prompt_cosine_stats(model) -> Tuple[str, str]:
+    """Tính chỉ số Cosine Similarity thực tế giữa các prompt tokens ở 3 cấp decoder:
+    - Cách 1: Channel-Pooled (sau spatial average pooling).
+    - Cách 2: Flat Tensor (toàn bộ C x H x W).
+    Áp dụng cho mọi nhánh (A, B, C).
+    """
+    stats_pool = []
+    stats_flat = []
     for p_name in ['prompt1', 'prompt2', 'prompt3']:
         p_block = getattr(model, p_name, None)
         if p_block is None:
             continue
-        bank = getattr(p_block, 'prompt_low', getattr(p_block, 'prompt_bank1', None))
+        # Nạp bank đại diện tương ứng từng nhánh: prompt_low (B), prompt_bank1 (C), prompt_param (A)
+        bank = getattr(p_block, 'prompt_low', getattr(p_block, 'prompt_bank1', getattr(p_block, 'prompt_param', None)))
         if bank is not None:
             N = bank.shape[1]
+            eye = torch.eye(N, dtype=bool, device=bank.device)
+
+            # 1. Channel-Pooled
             v = bank.squeeze(0).mean(dim=(-2, -1))
             norm_v = F.normalize(v, p=2, dim=1)
-            gram = torch.mm(norm_v, norm_v.t())
-            off_diag = gram[~torch.eye(N, dtype=bool, device=bank.device)].abs()
-            stats.append(f"{off_diag.mean().item():.3f}")
-    return "/".join(stats) if stats else "N/A"
+            gram_pool = torch.mm(norm_v, norm_v.t())
+            off_pool = gram_pool[~eye].abs()
+            stats_pool.append(f"{off_pool.mean().item():.3f}")
+
+            # 2. Flat
+            flat = bank.squeeze(0).view(N, -1)
+            norm_f = F.normalize(flat, p=2, dim=1)
+            gram_flat = torch.mm(norm_f, norm_f.t())
+            off_flat = gram_flat[~eye].abs()
+            stats_flat.append(f"{off_flat.mean().item():.4f}")
+
+    str_pool = "/".join(stats_pool) if stats_pool else "N/A"
+    str_flat = "/".join(stats_flat) if stats_flat else "N/A"
+    return str_pool, str_flat
 
 
 def set_seed(seed: int = 42):
@@ -248,7 +267,7 @@ def run_experiment():
     parser.add_argument('--iters', type=int, default=1500, help="Số iterations huấn luyện")
     parser.add_argument('--batch_size', type=int, default=4, help="Kích thước batch")
     parser.add_argument('--lr', type=float, default=2e-4, help="Tốc độ học")
-    parser.add_argument('--lambda_orth', type=float, default=0.05, help="Hệ số phạt trực giao OPR")
+    parser.add_argument('--lambda_orth', type=float, default=0.0, help="Hệ số phạt trực giao OPR (Mặc định 0.0 theo Phương án 2)")
     parser.add_argument('--val_freq', type=int, default=250, help="Tần suất đánh giá validation")
     parser.add_argument('--init_weights', type=str, default="baselines/weights/promptir_all.ckpt", help="Đường dẫn pretrained")
     parser.add_argument('--train_dir', type=str, default="data/train_v2/clean", help="Thư mục ảnh train sạch")
@@ -359,7 +378,8 @@ def run_experiment():
         elapsed_step = time.perf_counter() - t_step
 
         if iter_count % 50 == 0 or iter_count == 1:
-            cos_str = f" | Cos(L1/L2/L3): {get_prompt_cosine_stats(model)}" if args.branch in ['B', 'C'] else ""
+            cos_pool, cos_flat = get_prompt_cosine_stats(model)
+            cos_str = f" | Cos_Pool: {cos_pool} | Cos_Flat: {cos_flat}" if cos_pool != "N/A" else ""
             print(f"Iter [{iter_count:4d}/{args.iters}] | Recon Loss: {loss_recon.item():.4f} | Orth Loss: {loss_orth.item():.4f}{cos_str} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {elapsed_step:.2f}s")
 
         # 7. Đánh giá Validation định kỳ
