@@ -168,10 +168,18 @@ def verify_zero_leakage(
             if dist <= near_dup_threshold:
                 near_dups_val_test.append((p_v, p_te, dist))
 
+    near_dups_train_val = []
+    for p_tr, h_tr in train_dhash.items():
+        for p_v, h_v in val_dhash.items():
+            dist = hamming_distance(h_tr, h_v)
+            if dist <= near_dup_threshold:
+                near_dups_train_val.append((p_tr, p_v, dist))
+
     if verbose:
         print(f"-> Kiểm tra dHash nhận thức (Ngưỡng Hamming <= {near_dup_threshold}/64 bits):")
         print(f"   + Cặp gần trùng Train vs Test: {len(near_dups_train_test)}")
         print(f"   + Cặp gần trùng Val vs Test:   {len(near_dups_val_test)}")
+        print(f"   + Cặp gần trùng Train vs Val:  {len(near_dups_train_val)}")
 
     if len(near_dups_train_test) > 0:
         msg = f"\n[CHÍ MẠNG] PHÁT HIỆN {len(near_dups_train_test)} ẢNH GẦN TRÙNG (NEAR-DUPLICATES) GIỮA TRAIN VÀ TEST!\n"
@@ -183,6 +191,12 @@ def verify_zero_leakage(
         msg = f"\n[CHÍ MẠNG] PHÁT HIỆN {len(near_dups_val_test)} ẢNH GẦN TRÙNG (NEAR-DUPLICATES) GIỮA VAL VÀ TEST!\n"
         for p_v, p_te, d in near_dups_val_test[:10]:
             msg += f" - Gần trùng (Hamming dist={d}): Val [{p_v.name}] vs Test [{p_te.name}]\n"
+        raise AssertionError(msg)
+
+    if len(near_dups_train_val) > 0:
+        msg = f"\n[LỖI NGHIÊM TRỌNG] PHÁT HIỆN {len(near_dups_train_val)} ẢNH GẦN TRÙNG (NEAR-DUPLICATES) GIỮA TRAIN VÀ VAL!\n"
+        for p_tr, p_v, d in near_dups_train_val[:10]:
+            msg += f" - Gần trùng (Hamming dist={d}): Train [{p_tr.name}] vs Val [{p_v.name}]\n"
         raise AssertionError(msg)
 
     if verbose:

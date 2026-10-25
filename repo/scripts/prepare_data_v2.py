@@ -9,12 +9,17 @@ Mục đích:
 
 import os
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 import shutil
 import random
 import urllib.request
 import zipfile
 from pathlib import Path
 from PIL import Image
+import cv2
 import numpy as np
 
 # Thiết lập đường dẫn import
@@ -74,7 +79,18 @@ def download_and_extract_clean_pool(dest_dir: Path, target_count: int = 200):
                             if len(collected) >= target_count:
                                 break
         except Exception as e:
-            print(f"[THÔNG BÁO] Không thể tải BSDS500 qua URL ({e}), chuyển sang cơ chế tổng hợp phân vùng độc lập.")
+            print(f"[THÔNG BÁO] Không thể tải BSDS500 qua URL ({e}), tạo kho ảnh sạch phân vùng độc lập...")
+            import numpy as np
+            for i in range(len(collected), target_count):
+                rng_img = np.random.RandomState(50000 + i * 17)
+                # Tạo ảnh hoa văn kết cấu ngẫu nhiên hoàn toàn độc lập, khác biệt quang học
+                base = rng_img.randint(50, 200, (16, 16, 3), dtype=np.uint8)
+                img_rgb = cv2.resize(base, (256, 256), interpolation=cv2.INTER_CUBIC)
+                noise = rng_img.randint(-15, 15, (256, 256, 3), dtype=np.int16)
+                img_rgb = np.clip(img_rgb.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+                dst = dest_dir / f"clean_synthetic_{i:04d}.png"
+                Image.fromarray(img_rgb).save(dst)
+                collected.append(dst)
 
     return list(dest_dir.glob('*.png')) + list(dest_dir.glob('*.jpg'))
 

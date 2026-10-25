@@ -295,8 +295,51 @@ def run_diagnostics(args):
     # 3. P2-T3: Thử thách Out-Of-Distribution (OOD Testing)
     run_ood_tests(model, data_dir, device)
 
+def compute_radial_frequency_profile(clean_bgr, restored_bgr):
+    """Tính phổ năng lượng lỗi 2D FFT theo dải tần bán kính (Radial Frequency Band Analysis)
+    để kiểm định giả thuyết H1.
+    - Low-freq band (r <= 0.10 * r_max): DC, chiếu sáng, sương mù tổng thể
+    - Mid-freq band (0.10 < r <= 0.40 * r_max): Đường bao cấu trúc, hoa văn kết cấu
+    - High-freq band (r > 0.40 * r_max): Nhiễu hạt Gaussian, chi tiết sắc cạnh, vệt mưa
+    """
+    clean_gray = cv2.cvtColor(clean_bgr, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    rest_gray = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    err = np.abs(rest_gray - clean_gray)
+    
+    h, w = err.shape
+    cy, cx = h // 2, w // 2
+    r_max = np.sqrt(cy**2 + cx**2)
+    
+    f = np.fft.fft2(err)
+    fshift = np.fft.fftshift(f)
+    power_spec = np.abs(fshift) ** 2
+    
+    y, x = np.ogrid[:h, :w]
+    r = np.sqrt((x - cx)**2 + (y - cy)**2)
+    rho = r / (r_max + 1e-8)
+    
+    total_energy = float(np.sum(power_spec)) + 1e-12
+    low_mask = rho <= 0.10
+    mid_mask = (rho > 0.10) & (rho <= 0.40)
+    high_mask = rho > 0.40
+    
+    e_low = float(np.sum(power_spec[low_mask]))
+    e_mid = float(np.sum(power_spec[mid_mask]))
+    e_high = float(np.sum(power_spec[high_mask]))
+    
+    pct_low = (e_low / total_energy) * 100.0
+    pct_mid = (e_mid / total_energy) * 100.0
+    pct_high = (e_high / total_energy) * 100.0
+    
+    return {
+        'total_energy': total_energy,
+        'pct_low': round(pct_low, 2),
+        'pct_mid': round(pct_mid, 2),
+        'pct_high': round(pct_high, 2)
+    }
+
 def run_ood_tests(model, data_dir, device):
-    print("\n=== P2-T3: BẮT ĐẦU THỬ THÁCH OOD (OUT-OF-DISTRIBUTION BENCHMARK) ===")
+    print("\n=== P2-T3: BẮT ĐẦU THỬ THÁCH OOD & PHÂN TÍCH PHỔ NĂNG LƯỢNG LỖI (2D FFT RADIAL ENERGY) ===")
     
     bsd_candidates = [
         data_dir / 'test' / 'denoise' / 'bsd68',
@@ -310,18 +353,24 @@ def run_ood_tests(model, data_dir, device):
     clean_sample = cv2.imread(str(sample_file)) if sample_file else np.full((256, 256, 3), 128, dtype=np.uint8)
 
     ood_scenarios = [
-        {'name': 'Unseen_Noise_Sigma_10', 'type': 'noise', 'param': 10},
+        {'name': 'Pure_Noise_Sigma_25', 'type': 'noise', 'param': 25},
         {'name': 'Unseen_Noise_Sigma_35', 'type': 'noise', 'param': 35},
         {'name': 'Extreme_Noise_Sigma_75', 'type': 'noise', 'param': 75},
+        {'name': 'Pure_Haze_t_0.6', 'type': 'haze', 'param': 0.6},
         {'name': 'Hybrid_Noise25_Plus_Haze', 'type': 'hybrid', 'param': (25, 0.6)}
     ]
 
     records = []
+    freq_records = []
     for sc in ood_scenarios:
         if sc['type'] == 'noise':
             sigma = sc['param']
             noise = np.random.normal(0, sigma, clean_sample.shape).astype(np.float32)
             deg = np.clip(clean_sample.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+        elif sc['type'] == 'haze':
+            t = sc['param']
+            hazy = clean_sample.astype(np.float32) * t + 220 * (1 - t)
+            deg = np.clip(hazy, 0, 255).astype(np.uint8)
         else:
             sigma, t = sc['param']
             noise = np.random.normal(0, sigma, clean_sample.shape).astype(np.float32)
@@ -338,6 +387,7 @@ def run_ood_tests(model, data_dir, device):
 
         psnr_val = calculate_psnr(clean_sample, restored)
         ssim_val = calculate_ssim(clean_sample, restored)
+        f_prof = compute_radial_frequency_profile(clean_sample, restored)
 
         records.append({
             'scenario': sc['name'],
@@ -345,7 +395,15 @@ def run_ood_tests(model, data_dir, device):
             'ssim': round(ssim_val, 4),
             'status': '[ĐÃ VIẾT CHƯA CHẠY TRÊN GPU]' if model is None else '[ĐÃ XÁC NHẬN BẰNG LOG]'
         })
-        print(f"OOD [{sc['name']}]: PSNR = {psnr_val:.2f} dB, SSIM = {ssim_val:.4f}")
+        freq_records.append({
+            'scenario': sc['name'],
+            'psnr': round(psnr_val, 2),
+            'ssim': round(ssim_val, 4),
+            'pct_low_freq': f_prof['pct_low'],
+            'pct_mid_freq': f_prof['pct_mid'],
+            'pct_high_freq': f_prof['pct_high']
+        })
+        print(f"OOD [{sc['name']:25s}]: PSNR = {psnr_val:.2f} dB, SSIM = {ssim_val:.4f} | Lỗi FFT: Low={f_prof['pct_low']:5.2f}% Mid={f_prof['pct_mid']:5.2f}% High={f_prof['pct_high']:5.2f}%")
 
     for ood_csv in [Path('results/ood_baseline.csv'), Path('repo/results/ood_baseline.csv')]:
         ood_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +412,14 @@ def run_ood_tests(model, data_dir, device):
             writer.writeheader()
             writer.writerows(records)
         print(f"Đã lưu kết quả kiểm thử OOD vào: {ood_csv.resolve()}")
+
+    for freq_csv in [Path('results/diagnostics/fft_radial_energy_analysis.csv'), Path('repo/results/diagnostics/fft_radial_energy_analysis.csv')]:
+        freq_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(freq_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['scenario', 'psnr', 'ssim', 'pct_low_freq', 'pct_mid_freq', 'pct_high_freq'])
+            writer.writeheader()
+            writer.writerows(freq_records)
+        print(f"Đã lưu phân tích phổ lỗi 2D FFT vào: {freq_csv.resolve()}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Chẩn đoán lỗi và thử nghiệm OOD cho Baseline")

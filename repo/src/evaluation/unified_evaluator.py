@@ -63,7 +63,15 @@ def compute_metrics(
             psnr = 10.0 * math.log10((255.0 ** 2) / mse)
 
         if HAS_SKIMAGE:
-            ssim = compare_ssim(pred_uint8, gt_uint8, channel_axis=2, data_range=255)
+            ssim = compare_ssim(
+                pred_uint8,
+                gt_uint8,
+                channel_axis=2,
+                data_range=255,
+                win_size=11,
+                gaussian_weights=True,
+                sigma=1.5
+            )
         else:
             ssim = 1.0 - (mse / (255.0 ** 2))
     else:
@@ -75,7 +83,15 @@ def compute_metrics(
             psnr = -10.0 * math.log10(mse)
 
         if HAS_SKIMAGE:
-            ssim = compare_ssim(pred_np, gt_np, channel_axis=2, data_range=1.0)
+            ssim = compare_ssim(
+                pred_np,
+                gt_np,
+                channel_axis=2,
+                data_range=1.0,
+                win_size=11,
+                gaussian_weights=True,
+                sigma=1.5
+            )
         else:
             ssim = 1.0 - mse
 
