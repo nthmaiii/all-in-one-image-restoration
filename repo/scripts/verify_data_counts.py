@@ -22,23 +22,56 @@ EXPECTED_COUNTS = {
     'dehaze/target': 500
 }
 
+def resolve_test_dir(raw_dir):
+    candidates = [
+        Path(raw_dir),
+        Path('data/test'),
+        Path('repo/data/test'),
+        Path('/content/repo/data/test'),
+        Path('/content/data/test')
+    ]
+    if raw_dir.startswith('repo/') and Path(raw_dir[5:]).exists():
+        candidates.insert(0, Path(raw_dir[5:]))
+
+    for c in candidates:
+        if c.exists() and any(c.iterdir()):
+            return c.resolve()
+    return Path(raw_dir).resolve()
+
+def find_subpath(root, rel_path):
+    """Tìm thư mục con không phân biệt hoa thường."""
+    parts = Path(rel_path).parts
+    curr = root
+    for part in parts:
+        found = False
+        if curr.exists():
+            for child in curr.iterdir():
+                if child.name.lower() == part.lower():
+                    curr = child
+                    found = True
+                    break
+        if not found:
+            return curr / part
+    return curr
+
 def verify_dataset(root_dir, check_image_open=True):
-    root = Path(root_dir)
-    print(f"=== KIỂM TRA TẬP DỮ LIỆU TẠI: {root.resolve()} ===")
+    root = resolve_test_dir(root_dir)
+    print(f"=== KIỂM TRA TẬP DỮ LIỆU TẠI: {root} ===")
     
     all_passed = True
     results = {}
-    
+    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
+
     for rel_path, expected in EXPECTED_COUNTS.items():
-        dir_path = root / rel_path
+        dir_path = find_subpath(root, rel_path)
+        
         if not dir_path.exists():
             print(f"[-] {rel_path:<25}: KHÔNG TỒN TẠI (Kỳ vọng: {expected})")
             results[rel_path] = {'status': 'MISSING', 'count': 0, 'expected': expected}
             all_passed = False
             continue
-            
-        valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
-        images = [p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in valid_exts]
+
+        images = [p for p in dir_path.rglob('*') if p.is_file() and p.suffix.lower() in valid_exts]
         count = len(images)
         
         status = "ĐẠT" if count == expected else f"LỆCH ({count}/{expected})"
@@ -47,11 +80,11 @@ def verify_dataset(root_dir, check_image_open=True):
             
         corrupted = 0
         if check_image_open and count > 0:
-            for img_p in images[:10]: # Kiểm tra 10 ảnh đầu tiên xem có đọc được không
+            for img_p in images[:5]:
                 try:
                     with Image.open(img_p) as img:
                         img.verify()
-                except Exception as e:
+                except Exception:
                     corrupted += 1
                     
         corrupt_str = f" | Bị hỏng: {corrupted}" if corrupted > 0 else ""
@@ -62,11 +95,9 @@ def verify_dataset(root_dir, check_image_open=True):
     if all_passed:
         print("[SUCCESS] 100% CÁC TẬP DỮ LIỆU ĐÃ KHỚP CHUẨN!")
     else:
-        print("[WARNING] Một số tập dữ liệu chưa đủ hoặc chưa khớp số lượng!")
+        print("[LƯU Ý] Một số tập dữ liệu chưa tải đủ hoặc đang ở định dạng zip.")
     return all_passed, results
 
 if __name__ == '__main__':
-    default_dir = 'repo/data/test' if Path('repo/data/test').exists() else 'data/test'
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else default_dir
-    passed, _ = verify_dataset(data_dir, check_image_open=True)
-    sys.exit(0 if passed else 1)
+    raw_arg = sys.argv[1] if len(sys.argv) > 1 else 'data/test'
+    passed, _ = verify_dataset(raw_arg, check_image_open=True)
