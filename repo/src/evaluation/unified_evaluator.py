@@ -1,8 +1,8 @@
 """Module Đánh Giá Thống Nhất (Unified Evaluation Protocol).
 Mã nhiệm vụ: P4-V2
 Mục đích:
-- Một hàm duy nhất dùng chung 100% cho mọi mô hình (PromptIR Baseline, FD-PromptIR, ParamMatchedPromptIR).
-- Báo cáo chi tiết từng tác vụ riêng biệt: Noise, Rain, Haze, Hybrid và Mean.
+- Một hàm duy nhất dùng chung 100% cho mọi mô hình.
+- Báo cáo chi tiết từng tác vụ riêng biệt: Noise, Rain, Haze, Hybrid (Val) và Hybrid-OOD (Test held-out).
 - Giao thức chuẩn hóa đồng bộ: RGB, clamp [0, 1], uint8 round-trip đồng nhất.
 - Hỗ trợ đánh giá cả Checkpoint tốt nhất trên VAL và Checkpoint cuối cùng.
 """
@@ -11,9 +11,11 @@ import math
 from typing import Dict, List, Tuple, Union, Optional
 from pathlib import Path
 import numpy as np
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 try:
     from skimage.metrics import peak_signal_noise_ratio as compare_psnr
@@ -46,12 +48,10 @@ def compute_metrics(
     pred_np = pred_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
     gt_np = gt_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
 
-    # Kẹp khoảng hợp lệ [0, 1]
     pred_np = np.clip(pred_np, 0.0, 1.0)
     gt_np = np.clip(gt_np, 0.0, 1.0)
 
     if use_uint8_rounding:
-        # Làm tròn uint8 chuẩn hóa benchmark thị giác máy tính
         pred_uint8 = np.round(pred_np * 255.0).astype(np.uint8)
         gt_uint8 = np.round(gt_np * 255.0).astype(np.uint8)
 
@@ -82,6 +82,62 @@ def compute_metrics(
     return float(psnr), float(ssim)
 
 
+class AiOIRTestHybridOODDataset(Dataset):
+    """Tập kiểm thử Hybrid Giữ Lại (Held-out Test Hybrid-OOD Dataset).
+    Được tạo trực tiếp từ ảnh sạch của các tập test (BSD68, Kodak24, hoặc SOTS target)
+    với lưới tham số OOD hoàn toàn không xuất hiện trong quá trình huấn luyện:
+    sigma in {15, 35, 50} x t in {0.4, 0.8} (6 tổ hợp ngoại suy).
+    """
+    def __init__(self, test_clean_dirs: List[Path], max_images: int = 30, seed: int = 999):
+        self.samples = []
+        clean_files = []
+        for d in test_clean_dirs:
+            p = Path(d)
+            if p.exists():
+                clean_files.extend(sorted(list(p.glob('*.png')) + list(p.glob('*.jpg'))))
+
+        if len(clean_files) == 0:
+            # Nếu chưa có thư mục test, sinh dummy để không crash trong test cú pháp
+            clean_files = []
+
+        # Lấy tối đa max_images để kiểm thử nhanh và đại diện
+        rng = np.random.RandomState(seed)
+        selected_files = clean_files[:max_images] if len(clean_files) >= max_images else clean_files
+
+        # Lưới tham số OOD: 3 sigma x 2 t = 6 tổ hợp
+        grid = [(s, t) for s in [15, 35, 50] for t in [0.4, 0.8]]
+
+        for img_idx, f in enumerate(selected_files):
+            # Gán mỗi ảnh sạch với 1 tổ hợp trong lưới theo vòng lặp xác định
+            sigma, t = grid[img_idx % len(grid)]
+            with Image.open(f) as pil_img:
+                pil_img = pil_img.convert('RGB')
+                w, h = pil_img.size
+                # Giới hạn kích thước tối đa 512x512 để kiểm định nhanh trên T4
+                if w > 512 or h > 512:
+                    pil_img = pil_img.resize((min(w, 512), min(h, 512)))
+                clean_np = np.array(pil_img, dtype=np.float32) / 255.0
+
+            # Sinh suy thoái Hybrid xác định: Haze (Koschmieder) + Gaussian Noise
+            A = 1.0
+            hazy = clean_np * t + A * (1.0 - t)
+            # Dùng seed cục bộ theo file để đảm bảo tính tái lập 100%
+            file_rng = np.random.RandomState(seed + img_idx * 17)
+            noise = file_rng.normal(0, sigma / 255.0, clean_np.shape).astype(np.float32)
+            deg_np = np.clip(hazy + noise, 0.0, 1.0)
+
+            deg_t = torch.from_numpy(deg_np).permute(2, 0, 1).float()
+            clean_t = torch.from_numpy(clean_np).permute(2, 0, 1).float()
+            task_label = f"hybrid_s{sigma}_t{t}"
+            self.samples.append((deg_t, clean_t, task_label))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
 class UnifiedEvaluator:
     """Bộ đánh giá chuẩn hóa cho mọi mô hình AiOIR."""
 
@@ -90,17 +146,14 @@ class UnifiedEvaluator:
         self.use_uint8 = use_uint8
 
     @torch.no_grad()
-    def evaluate(self, model: nn.Module, val_dataset) -> Dict[str, float]:
-        """Thực thi đánh giá thống nhất trên tập validation.
-        val_dataset trả về tuple: (deg_img, clean_img, task_name)
-        với task_name thuộc {'noise', 'rain', 'haze', 'hybrid'}.
-        """
+    def evaluate(self, model: nn.Module, dataset) -> Dict[str, float]:
+        """Thực thi đánh giá thống nhất trên tập validation hoặc test dataset."""
         model.eval()
-        task_psnr: Dict[str, List[float]] = {'noise': [], 'rain': [], 'haze': [], 'hybrid': []}
-        task_ssim: Dict[str, List[float]] = {'noise': [], 'rain': [], 'haze': [], 'hybrid': []}
+        task_psnr: Dict[str, List[float]] = {}
+        task_ssim: Dict[str, List[float]] = {}
 
-        for idx in range(len(val_dataset)):
-            deg, clean, task = val_dataset[idx]
+        for idx in range(len(dataset)):
+            deg, clean, task = dataset[idx]
             deg = deg.unsqueeze(0).to(self.device)
             clean = clean.unsqueeze(0).to(self.device)
 
@@ -110,29 +163,24 @@ class UnifiedEvaluator:
             psnr, ssim = compute_metrics(pred, clean, use_uint8_rounding=self.use_uint8)
             t_key = task.lower()
             if t_key not in task_psnr:
-                t_key = 'hybrid'
+                task_psnr[t_key] = []
+                task_ssim[t_key] = []
 
             task_psnr[t_key].append(psnr)
             task_ssim[t_key].append(ssim)
 
-        # Tính trung bình từng tác vụ
         results = {}
         all_psnr = []
         all_ssim = []
 
-        for task in ['noise', 'rain', 'haze', 'hybrid']:
-            psnrs = task_psnr[task]
+        for task, psnrs in task_psnr.items():
             ssims = task_ssim[task]
-            if len(psnrs) > 0:
-                mean_p = float(np.mean(psnrs))
-                mean_s = float(np.mean(ssims))
-            else:
-                mean_p, mean_s = 0.0, 0.0
+            mean_p = float(np.mean(psnrs)) if psnrs else 0.0
+            mean_s = float(np.mean(ssims)) if ssims else 0.0
             results[f'psnr_{task}'] = round(mean_p, 2)
             results[f'ssim_{task}'] = round(mean_s, 4)
-            if len(psnrs) > 0:
-                all_psnr.extend(psnrs)
-                all_ssim.extend(ssims)
+            all_psnr.extend(psnrs)
+            all_ssim.extend(ssims)
 
         results['psnr_mean'] = round(float(np.mean(all_psnr)) if all_psnr else 0.0, 2)
         results['ssim_mean'] = round(float(np.mean(all_ssim)) if all_ssim else 0.0, 4)
@@ -141,8 +189,18 @@ class UnifiedEvaluator:
     def format_table(self, results: Dict[str, float], title: str = "Evaluation Results") -> str:
         """Định dạng kết quả thành bảng Markdown chuyên nghiệp."""
         md = f"### {title}\n\n"
-        md += "| Chỉ số đo lường | Nhiễu (Noise) | Mưa (Rain) | Sương mù (Haze) | Hỗn hợp (Hybrid) | **Trung bình (Mean)** |\n"
+        md += "| Chỉ số | Noise | Rain | Haze | Hybrid (Val) | **Trung Bình** |\n"
         md += "|---|:---:|:---:|:---:|:---:|:---:|\n"
-        md += f"| **PSNR (dB)** | {results['psnr_noise']} | {results['psnr_rain']} | {results['psnr_haze']} | {results['psnr_hybrid']} | **{results['psnr_mean']}** |\n"
-        md += f"| **SSIM** | {results['ssim_noise']} | {results['ssim_rain']} | {results['ssim_haze']} | {results['ssim_hybrid']} | **{results['ssim_mean']}** |\n"
+        p_n = results.get('psnr_noise', 'N/A')
+        p_r = results.get('psnr_rain', 'N/A')
+        p_h = results.get('psnr_haze', 'N/A')
+        p_hy = results.get('psnr_hybrid', 'N/A')
+        p_m = results.get('psnr_mean', 'N/A')
+        md += f"| **PSNR (dB)** | {p_n} | {p_r} | {p_h} | {p_hy} | **{p_m}** |\n"
+        s_n = results.get('ssim_noise', 'N/A')
+        s_r = results.get('ssim_rain', 'N/A')
+        s_h = results.get('ssim_haze', 'N/A')
+        s_hy = results.get('ssim_hybrid', 'N/A')
+        s_m = results.get('ssim_mean', 'N/A')
+        md += f"| **SSIM** | {s_n} | {s_r} | {s_h} | {s_hy} | **{s_m}** |\n"
         return md

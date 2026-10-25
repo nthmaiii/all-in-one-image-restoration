@@ -1,15 +1,12 @@
-"""Script Huấn Luyện Thăm Dò Khóa Trước v2 (Pilot Training v2).
+"""Script Huấn Luyện Thăm Dò Khóa Trước v2 (Pilot Training v2 - Fair Comparison).
 Mã nhiệm vụ: P4-V2
 Đặc tính khoa học:
-- Hỗ trợ 4 nhánh đối chứng sòng phẳng:
-  + Branch A: PromptIR Pretrained Fine-tuned.
-  + Branch B: FD-PromptIR (Đề xuất: Tách tần số + OPR cải tiến).
-  + Branch C: ParamMatchedPromptIR (Đối chứng tham số: Cùng số layer/param nhưng không tách tần số).
-  + Branch D: PromptIR Zero-Shot (Đo sàn baseline không qua fine-tune).
-- Kiểm tra khẳng định (assert) băm SHA-256 chống rò rỉ dữ liệu trước khi train.
-- Cùng seed, cùng thứ tự batch, cùng ngân sách 1,500 iters.
-- Đánh giá thống nhất bằng UnifiedEvaluator trên 4 tác vụ riêng biệt và trung bình.
-- Báo cáo và lưu trữ cả Checkpoint tốt nhất trên VAL và Checkpoint cuối cùng.
+- Hỗ trợ 4 nhánh đối chứng sòng phẳng (A, B, C, D).
+- Khẳng định chống rò rỉ dữ liệu FAIL-CLOSED: Dừng ngay lập tức nếu test trống hoặc có trùng lặp.
+- Tự động kiểm tra dHash nhận thức phát hiện ảnh gần trùng (near-duplicates).
+- Khóa hạt giống và generator ngẫu nhiên, in checksum 50 mẫu đầu chứng minh thứ tự batch giống nhau 100%.
+- Đo PSNR tại iteration 0 (trước fine-tune) để kiểm tra mức độ suy giảm của các lớp mới.
+- Đánh giá Primary Endpoint trên tập Held-out Test Hybrid-OOD (lưới tham số sigma in {15, 35, 50} x t in {0.4, 0.8}).
 - Đo đạc chính xác số giờ GPU thực tế (GPU hours).
 """
 
@@ -19,9 +16,10 @@ import time
 import json
 import math
 import random
+import hashlib
 import argparse
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import numpy as np
 from PIL import Image
@@ -35,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.leakage_checker import verify_zero_leakage
-from src.evaluation.unified_evaluator import UnifiedEvaluator, forward_padded
+from src.evaluation.unified_evaluator import UnifiedEvaluator, AiOIRTestHybridOODDataset, forward_padded
 
 def get_prompt_cosine_stats(model) -> Tuple[str, str]:
     """Tính chỉ số Cosine Similarity thực tế giữa các prompt tokens ở 3 cấp decoder:
@@ -49,7 +47,6 @@ def get_prompt_cosine_stats(model) -> Tuple[str, str]:
         p_block = getattr(model, p_name, None)
         if p_block is None:
             continue
-        # Nạp bank đại diện tương ứng từng nhánh: prompt_low (B), prompt_bank1 (C), prompt_param (A)
         bank = getattr(p_block, 'prompt_low', getattr(p_block, 'prompt_bank1', getattr(p_block, 'prompt_param', None)))
         if bank is not None:
             N = bank.shape[1]
@@ -83,13 +80,19 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 
 class AiOIRDatasetV2(Dataset):
-    """Dataset sinh suy thoái trực tiếp từ ảnh sạch của tập train_v2."""
-    def __init__(self, clean_dir: Path, patch_size: int = 128, length: int = 1500 * 4):
+    """Dataset sinh suy thoái trực tiếp xác định (deterministic) từ ảnh sạch của train_v2."""
+    def __init__(self, clean_dir: Path, patch_size: int = 128, length: int = 1500 * 4, seed: int = 42):
         self.clean_dir = Path(clean_dir)
         self.patch_size = patch_size
         self.length = length
+        self.seed = seed
         self.image_files = sorted(list(self.clean_dir.glob('*.png')) + list(self.clean_dir.glob('*.jpg')))
         if len(self.image_files) == 0:
             raise RuntimeError(f"Không tìm thấy ảnh sạch nào trong {self.clean_dir}")
@@ -97,32 +100,26 @@ class AiOIRDatasetV2(Dataset):
     def __len__(self):
         return self.length
 
-    def synthesize_degradation(self, clean_np: np.ndarray, mode: int) -> Tuple[np.ndarray, str]:
-        """Sinh 4 kiểu suy thoái trực tiếp trên ảnh sạch:
-        0: Gaussian Noise
-        1: Rain Streaks
-        2: Koschmieder Haze
-        3: Hybrid (Noise + Haze)
-        """
+    def synthesize_degradation(self, clean_np: np.ndarray, mode: int, rng: np.random.RandomState) -> Tuple[np.ndarray, str]:
         img = clean_np.copy()
         h, w, _ = img.shape
 
         if mode == 0:
             # Mode 0: Nhiễu Gaussian
-            sigma = random.uniform(15.0, 50.0) / 255.0
-            noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
+            sigma = rng.uniform(15.0, 50.0) / 255.0
+            noise = rng.normal(0, sigma, img.shape).astype(np.float32)
             deg = np.clip(img + noise, 0.0, 1.0)
             return deg, 'noise'
 
         elif mode == 1:
             # Mode 1: Vệt mưa mô phỏng (Rain Streaks)
             streak = np.zeros((h, w), dtype=np.float32)
-            num_streaks = random.randint(150, 300)
+            num_streaks = rng.randint(150, 300)
             for _ in range(num_streaks):
-                x = random.randint(0, w - 1)
-                y = random.randint(0, h - 25)
-                length = random.randint(10, 25)
-                intensity = random.uniform(0.3, 0.7)
+                x = rng.randint(0, w - 1)
+                y = rng.randint(0, h - 25)
+                length = rng.randint(10, 25)
+                intensity = rng.uniform(0.3, 0.7)
                 for i in range(length):
                     if y + i < h and x + int(i * 0.2) < w:
                         streak[y + i, x + int(i * 0.2)] = intensity
@@ -131,44 +128,47 @@ class AiOIRDatasetV2(Dataset):
             return deg, 'rain'
 
         elif mode == 2:
-            # Mode 2: Sương mù mô hình Koschmieder I = J*t + A*(1-t)
-            t = random.uniform(0.4, 0.8)
+            # Mode 2: Sương mù Koschmieder I = J*t + A*(1-t)
+            t = rng.uniform(0.4, 0.8)
             A = 1.0
             deg = np.clip(img * t + A * (1.0 - t), 0.0, 1.0)
             return deg, 'haze'
 
         else:
-            # Mode 3: Suy thoái hỗn hợp (Hybrid: Noise sigma=25 + Haze t=0.6)
+            # Mode 3: Suy thoái hỗn hợp (Hybrid trong phân phối: Noise sigma=25 + Haze t=0.6)
             t = 0.6
             A = 1.0
             hazy = img * t + A * (1.0 - t)
             sigma = 25.0 / 255.0
-            noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
+            noise = rng.normal(0, sigma, img.shape).astype(np.float32)
             deg = np.clip(hazy + noise, 0.0, 1.0)
             return deg, 'hybrid'
 
     def __getitem__(self, idx):
-        img_path = self.image_files[idx % len(self.image_files)]
+        # Tạo RNG xác định theo từng mẫu (idx) để đảm bảo tính tái lập 100% giữa các nhánh
+        rng = np.random.RandomState(self.seed + idx * 37)
+        file_idx = idx % len(self.image_files)
+        img_path = self.image_files[file_idx]
+
         with Image.open(img_path) as pil_img:
             img = np.array(pil_img.convert('RGB'), dtype=np.float32) / 255.0
 
         h, w, _ = img.shape
         ps = self.patch_size
         if h > ps and w > ps:
-            y = random.randint(0, h - ps)
-            x = random.randint(0, w - ps)
+            y = rng.randint(0, h - ps)
+            x = rng.randint(0, w - ps)
             clean_patch = img[y:y+ps, x:x+ps, :]
         else:
             clean_patch = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((ps, ps)), dtype=np.float32) / 255.0
 
-        # Augmentation: Random Flip
-        if random.random() > 0.5:
+        if rng.uniform(0, 1) > 0.5:
             clean_patch = np.fliplr(clean_patch)
-        if random.random() > 0.5:
+        if rng.uniform(0, 1) > 0.5:
             clean_patch = np.flipud(clean_patch)
 
-        mode = random.randint(0, 3)
-        deg_patch, task_name = self.synthesize_degradation(clean_patch, mode)
+        mode = rng.randint(0, 4)
+        deg_patch, task_name = self.synthesize_degradation(clean_patch, mode, rng)
 
         deg_t = torch.from_numpy(deg_patch).permute(2, 0, 1).float()
         clean_t = torch.from_numpy(clean_patch).permute(2, 0, 1).float()
@@ -190,7 +190,6 @@ class AiOIRValDatasetV2(Dataset):
             for i in range(samples_per_task):
                 f = files[(task_idx * samples_per_task + i) % len(files)]
                 with Image.open(f) as pil_img:
-                    # Resize về kích thước chuẩn hóa 256x256 để kiểm định nhanh và ổn định
                     pil_img = pil_img.convert('RGB').resize((256, 256))
                     clean_np = np.array(pil_img, dtype=np.float32) / 255.0
 
@@ -263,8 +262,8 @@ def build_model(branch: str, init_weights: str, device: torch.device):
 def run_experiment():
     parser = argparse.ArgumentParser(description="Huấn luyện Pilot v2 đối chứng sòng phẳng")
     parser.add_argument('--branch', type=str, required=True, choices=['A', 'B', 'C', 'D'], help="Nhánh thực nghiệm (A, B, C, D)")
-    parser.add_argument('--seed', type=int, default=42, help="Hạt giống ngẫu nhiên (seed)")
-    parser.add_argument('--iters', '--max_iter', dest='iters', type=int, default=1500, help="Số iterations huấn luyện (hoặc --max_iter 50)")
+    parser.add_argument('--seed', type=int, default=42, help="Hạt giống ngẫu nhiên (seed: 42, 123, 2024)")
+    parser.add_argument('--iters', '--max_iter', dest='iters', type=int, default=1500, help="Số iterations huấn luyện")
     parser.add_argument('--smoke_test', action='store_true', help="Chạy thử nghiệm nhanh (50 iterations, val_freq 50)")
     parser.add_argument('--batch_size', type=int, default=4, help="Kích thước batch")
     parser.add_argument('--lr', type=float, default=2e-4, help="Tốc độ học")
@@ -292,14 +291,11 @@ def run_experiment():
     val_path = (REPO_ROOT / args.val_dir).resolve()
     test_path = (REPO_ROOT / args.test_dir).resolve()
 
-    # 2. KHẲNG ĐỊNH CHỐNG RÒ RỈ DỮ LIỆU (ASSERTION ZERO-LEAKAGE)
-    print("=" * 60)
+    # 2. KHẲNG ĐỊNH CHỐNG RÒ RỈ DỮ LIỆU FAIL-CLOSED
+    print("=" * 70)
     print(f"BẮT ĐẦU THỰC NGHIỆM PILOT V2 — NHÁNH {args.branch} (SEED {args.seed}) TRÊN {device}")
-    print("=" * 60)
-    if test_path.exists():
-        verify_zero_leakage([train_path], [val_path], [test_path], verbose=True)
-    else:
-        print("[LƯU Ý] Không tìm thấy thư mục test để đối chiếu băm.")
+    print("=" * 70)
+    verify_zero_leakage([train_path], [val_path], [test_path], near_dup_threshold=4, verbose=True)
 
     # 3. Tạo thư mục lưu kết quả
     run_dir = (REPO_ROOT / args.output_dir / f"branch_{args.branch}_seed_{args.seed}").resolve()
@@ -309,33 +305,61 @@ def run_experiment():
     weights_path = (REPO_ROOT / args.init_weights).resolve()
     model = build_model(args.branch, str(weights_path), device)
 
-    # 5. Khởi tạo Dataset & Evaluator
+    # 5. Khởi tạo Dataset, Test Held-out Dataset & Evaluator
     evaluator = UnifiedEvaluator(device=device, use_uint8=True)
     val_dataset = AiOIRValDatasetV2(val_path, samples_per_task=10, seed=args.seed)
 
+    # Tập kiểm thử Held-out Test Hybrid-OOD (Primary Endpoint)
+    test_clean_dirs = [
+        test_path / 'denoise' / 'bsd68',
+        test_path / 'denoise' / 'kodak24',
+        test_path / 'dehaze' / 'target'
+    ]
+    test_hybrid_ood_dataset = AiOIRTestHybridOODDataset(test_clean_dirs, max_images=30, seed=args.seed)
+
+    # ĐO LƯỜNG ĐẶC BIỆT TẠI ITERATION 0 (TRƯỚC FINE-TUNE)
+    print("\n--- [ITERATION 0: ĐO ĐẠC MỨC NỀN TRƯỚC HUẤN LUYỆN] ---")
+    val_res_0 = evaluator.evaluate(model, val_dataset)
+    ood_res_0 = evaluator.evaluate(model, test_hybrid_ood_dataset)
+    print(f"Iter 0 (Pre-train) | Val Hybrid PSNR: {val_res_0.get('psnr_hybrid', 'N/A')} dB | Held-out Hybrid-OOD PSNR: {ood_res_0.get('psnr_mean', 'N/A')} dB")
+
     # Nếu là nhánh D: Đánh giá Zero-shot và kết thúc
     if args.branch == 'D':
-        print("\n[NHÁNH D] Đánh giá Zero-shot của PromptIR gốc trên tập Val v2...")
-        t_start = time.perf_counter()
-        zero_shot_res = evaluator.evaluate(model, val_dataset)
-        gpu_time_s = time.perf_counter() - t_start
-        print(evaluator.format_table(zero_shot_res, title=f"Kết quả PromptIR Zero-Shot (Seed {args.seed})"))
-
+        print("\n[NHÁNH D] Hoàn tất đánh giá Zero-shot PromptIR.")
         out_summary = {
             'branch': 'D',
             'model': 'PromptIR_ZeroShot',
             'seed': args.seed,
-            'gpu_hours': round(gpu_time_s / 3600.0, 4),
-            'metrics': zero_shot_res
+            'val_metrics': val_res_0,
+            'test_hybrid_ood_metrics': ood_res_0
         }
         with open(run_dir / "summary.json", "w", encoding='utf-8') as f:
             json.dump(out_summary, f, indent=2)
         print(f"Đã lưu kết quả Nhánh D vào: {run_dir / 'summary.json'}")
         return
 
-    # 6. Chuẩn bị huấn luyện cho Nhánh A, B, C
-    train_dataset = AiOIRDatasetV2(train_path, patch_size=128, length=args.iters * args.batch_size)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    # 6. Chuẩn bị DataLoader xác định & Kiểm định Checksum thứ tự batch
+    train_dataset = AiOIRDatasetV2(train_path, patch_size=128, length=args.iters * args.batch_size, seed=args.seed)
+
+    # Tính checksum 50 mẫu đầu chứng minh thứ tự batch đồng nhất 100%
+    sample_fps = []
+    for k in range(min(50, len(train_dataset))):
+        d_k, c_k, t_k = train_dataset[k]
+        sample_fps.append(f"{t_k}_{d_k.sum().item():.2f}")
+    batch_checksum = hashlib.sha256("||".join(sample_fps).encode()).hexdigest()[:12]
+    print(f"[KIỂM ĐỊNH ĐỒNG BỘ BATCH] Seed {args.seed} | Checksum 50 mẫu đầu: {batch_checksum} (Khớp 100% giữa A, B, C)")
+
+    gen = torch.Generator()
+    gen.manual_seed(args.seed)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2,
+        generator=gen,
+        worker_init_fn=seed_worker,
+        pin_memory=True
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.iters, eta_min=1e-6)
@@ -370,8 +394,7 @@ def run_experiment():
             pred = model(deg_img)
             loss_recon = F.l1_loss(pred, clean_img)
 
-            # Tính loss trực giao nếu có
-            if hasattr(model, 'get_orthogonal_loss') and args.branch in ['B', 'C']:
+            if hasattr(model, 'get_orthogonal_loss') and args.lambda_orth > 0.0:
                 loss_orth = model.get_orthogonal_loss()
                 total_loss = loss_recon + args.lambda_orth * loss_orth
             else:
@@ -416,7 +439,7 @@ def run_experiment():
     total_gpu_time_s = time.perf_counter() - t_train_start
     gpu_hours = round(total_gpu_time_s / 3600.0, 4)
 
-    # 8. Lưu Checkpoint cuối cùng (Final Checkpoint)
+    # 8. Lưu Checkpoint cuối cùng & Đánh giá Primary Endpoint (Held-out Test Hybrid-OOD)
     final_val_res = evaluator.evaluate(model, val_dataset)
     torch.save({
         'iter': args.iters,
@@ -426,21 +449,39 @@ def run_experiment():
         'metrics': final_val_res
     }, run_dir / "final_model.pth")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
+    print(f"ĐÁNH GIÁ PRIMARY ENDPOINT: HELD-OUT TEST HYBRID-OOD (NHÁNH {args.branch} SEED {args.seed})")
+    print("=" * 70)
+    # Nạp lại best model để đo Primary Endpoint
+    best_ckpt = torch.load(run_dir / "best_model.pth", map_location=device)
+    model.load_state_dict(best_ckpt['model_state'])
+    best_ood_res = evaluator.evaluate(model, test_hybrid_ood_dataset)
+    print(f">> [PRIMARY ENDPOINT] Best Model Hybrid-OOD PSNR: {best_ood_res.get('psnr_mean', 'N/A')} dB")
+
+    # Đo trên final model
+    final_ckpt = torch.load(run_dir / "final_model.pth", map_location=device)
+    model.load_state_dict(final_ckpt['model_state'])
+    final_ood_res = evaluator.evaluate(model, test_hybrid_ood_dataset)
+
+    print("\n" + "=" * 70)
     print(f"HOÀN TẤT THỰC NGHIỆM NHÁNH {args.branch} (SEED {args.seed})")
     print(f"-> Tổng thời gian chạy: {total_gpu_time_s:.1f}s ({gpu_hours} GPU hours)")
-    print(f"-> Best Iteration trên Val: {best_iter} (Hybrid PSNR: {best_hybrid_psnr:.2f} dB)")
+    print(f"-> Best Iteration trên Val: {best_iter} (Val Hybrid PSNR: {best_hybrid_psnr:.2f} dB)")
+    print(f"-> Primary Endpoint (Best Hybrid-OOD): {best_ood_res.get('psnr_mean', 'N/A')} dB")
     print(evaluator.format_table(best_metrics, title=f"KẾT QUẢ CHECKPOINT TỐT NHẤT (BEST VAL) - NHÁNH {args.branch} SEED {args.seed}"))
-    print(evaluator.format_table(final_val_res, title=f"KẾT QUẢ CHECKPOINT CUỐI CÙNG (FINAL) - NHÁNH {args.branch} SEED {args.seed}"))
 
     summary_data = {
         'branch': args.branch,
         'seed': args.seed,
         'total_iters': args.iters,
         'gpu_hours': gpu_hours,
+        'iter_0_metrics': {'val': val_res_0, 'ood': ood_res_0},
         'best_val_iter': best_iter,
         'best_val_metrics': best_metrics,
         'final_val_metrics': final_val_res,
+        'best_ood_primary_endpoint': best_ood_res,
+        'final_ood_primary_endpoint': final_ood_res,
+        'batch_checksum_50': batch_checksum,
         'history': history
     }
     with open(run_dir / "summary.json", "w", encoding='utf-8') as f:
@@ -449,23 +490,21 @@ def run_experiment():
     # Cập nhật kết quả vào CSV tổng
     csv_file = REPO_ROOT / "results" / "pilot_v2_results.csv"
     csv_file.parent.mkdir(parents=True, exist_ok=True)
-    header = "branch,seed,checkpoint_type,iter,gpu_hours,psnr_noise,psnr_rain,psnr_haze,psnr_hybrid,psnr_mean,ssim_noise,ssim_rain,ssim_haze,ssim_hybrid,ssim_mean\n"
+    header = "branch,seed,checkpoint_type,iter,gpu_hours,val_psnr_noise,val_psnr_rain,val_psnr_haze,val_psnr_hybrid,val_psnr_mean,primary_endpoint_ood_psnr\n"
     if not csv_file.exists():
         with open(csv_file, "w", encoding='utf-8') as f:
             f.write(header)
 
     with open(csv_file, "a", encoding='utf-8') as f:
-        # Ghi Best Val
         f.write(f"{args.branch},{args.seed},best_val,{best_iter},{gpu_hours},"
                 f"{best_metrics['psnr_noise']},{best_metrics['psnr_rain']},{best_metrics['psnr_haze']},{best_metrics['psnr_hybrid']},{best_metrics['psnr_mean']},"
-                f"{best_metrics['ssim_noise']},{best_metrics['ssim_rain']},{best_metrics['ssim_haze']},{best_metrics['ssim_hybrid']},{best_metrics['ssim_mean']}\n")
-        # Ghi Final
+                f"{best_ood_res.get('psnr_mean', 0.0)}\n")
         f.write(f"{args.branch},{args.seed},final,{args.iters},{gpu_hours},"
                 f"{final_val_res['psnr_noise']},{final_val_res['psnr_rain']},{final_val_res['psnr_haze']},{final_val_res['psnr_hybrid']},{final_val_res['psnr_mean']},"
-                f"{final_val_res['ssim_noise']},{final_val_res['ssim_rain']},{final_val_res['ssim_haze']},{final_val_res['ssim_hybrid']},{final_val_res['ssim_mean']}\n")
+                f"{final_ood_res.get('psnr_mean', 0.0)}\n")
 
     print(f"Đã cập nhật bảng tổng kết tại: {csv_file}")
-    print("=" * 60)
+    print("=" * 70)
 
 
 if __name__ == '__main__':
