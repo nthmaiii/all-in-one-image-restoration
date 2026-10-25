@@ -87,17 +87,32 @@ class FDPromptGenBlock(nn.Module):
 
     def get_orthogonal_loss(self):
         """Tính hàm mất mát trực giao hóa (OPR) trên cả 2 kho prompt.
-        Ép cosine similarity giữa các vector prompt khác nhau tiến về 0.
+        Thay vì dẹp toàn bộ tensor (D > 260,000 khiến tích vô hướng ngẫu nhiên triệt tiêu về 0),
+        chúng ta tính trung bình không gian (spatial pooling) của từng token để thu được
+        vector đặc trưng kênh (C-dim), sau đó chuẩn hóa và tính ma trận Gram cosine:
+        Gram = (V / ||V||) (V / ||V||)^T.
+        Hàm mất mát phạt cả trực giao nội bộ (intra-bank) và trực giao chéo (inter-bank).
         """
-        loss = 0.0
-        for bank in [self.prompt_low, self.prompt_high]:
-            flat = bank.squeeze(0).view(self.prompt_len, -1)
-            norm = F.normalize(flat, p=2, dim=1)
-            cosine_sim = torch.mm(norm, norm.t())
-            eye = torch.eye(self.prompt_len, device=bank.device)
-            off_diag = cosine_sim - eye
-            loss += (off_diag ** 2).sum() / (self.prompt_len * (self.prompt_len - 1))
-        return loss / 2.0
+        # bank shape: (1, prompt_len, prompt_dim, H_p, W_p)
+        v_low = self.prompt_low.squeeze(0).mean(dim=(-2, -1))   # (prompt_len, prompt_dim)
+        v_high = self.prompt_high.squeeze(0).mean(dim=(-2, -1)) # (prompt_len, prompt_dim)
+
+        norm_low = F.normalize(v_low, p=2, dim=1)
+        norm_high = F.normalize(v_high, p=2, dim=1)
+
+        # 1. Intra-bank orthogonality (nội bộ bank thấp tần và cao tần)
+        gram_low = torch.mm(norm_low, norm_low.t())
+        gram_high = torch.mm(norm_high, norm_high.t())
+        eye = torch.eye(self.prompt_len, device=self.prompt_low.device)
+
+        loss_intra_low = ((gram_low - eye) ** 2).sum() / (self.prompt_len * (self.prompt_len - 1))
+        loss_intra_high = ((gram_high - eye) ** 2).sum() / (self.prompt_len * (self.prompt_len - 1))
+
+        # 2. Inter-bank cross-orthogonality (trực giao giữa thấp tần và cao tần)
+        gram_cross = torch.mm(norm_low, norm_high.t())
+        loss_cross = (gram_cross ** 2).mean()
+
+        return 0.5 * (loss_intra_low + loss_intra_high) + loss_cross
 
 
 class FDPromptIR(nn.Module):
