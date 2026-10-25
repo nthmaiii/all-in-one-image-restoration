@@ -1,0 +1,23 @@
+# 1. Bỏ qua các folder tài liệu / code tải về hiện tại
+Dataset-Metrix/
+paper2026/
+Toolbox/
+LLM-Guided/
+All-in-one/
+transformer/
+Diffusion-Model/
+CNN GAN/
+survey/
+
+# 2. Bỏ qua các định dạng file nặng phòng ngừa
+*.pdf
+*.pth
+*.pt
+*.onnx
+*.zip
+*.tar.gz
+
+# 3. Bỏ qua cache hệ thống và Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
