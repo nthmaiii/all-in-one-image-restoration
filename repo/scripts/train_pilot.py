@@ -142,13 +142,7 @@ def build_model(model_name, init_weights=None, device='cuda'):
         try:
             from src.models.fd_promptir import FDPromptIR
         except ImportError:
-            try:
-                from repo.src.models.fd_promptir import FDPromptIR
-            except ImportError:
-                import sys
-                from pathlib import Path
-                sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-                from src.models.fd_promptir import FDPromptIR
+            from repo.src.models.fd_promptir import FDPromptIR
 
         print("[MÔ HÌNH] Khởi tạo FD-PromptIR (Frequency-Decoupled Dynamic Prompting)...")
         model = FDPromptIR(decoder=True)
