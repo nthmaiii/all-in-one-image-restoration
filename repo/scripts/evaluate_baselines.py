@@ -202,8 +202,10 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
     if max_images:
         in_images = in_images[:max_images]
 
-    print(f">> Bắt đầu đánh giá {task_name} ({dataset_name}) trên {len(in_images)} cặp ảnh (Y-channel={use_y_channel})...")
-    psnr_list, ssim_list, lpips_list = [], [], []
+    print(f">> Bắt đầu đánh giá {task_name} ({dataset_name}) trên {len(in_images)} cặp ảnh...")
+    psnr_y_list, ssim_y_list = [], []
+    psnr_rgb_list, ssim_rgb_list = [], []
+    lpips_list = []
 
     for img_file in in_images:
         tar_file = tar_p / img_file.name
@@ -243,43 +245,47 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
             else:
                 tar_np = cv2.resize(tar_np, (restored_np.shape[1], restored_np.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        if use_y_channel:
-            r_y = 0.257 * restored_np[:, :, 0] + 0.504 * restored_np[:, :, 1] + 0.098 * restored_np[:, :, 2] + 16.0 / 255.0
-            t_y = 0.257 * tar_np[:, :, 0] + 0.504 * tar_np[:, :, 1] + 0.098 * tar_np[:, :, 2] + 16.0 / 255.0
-            if r_y.shape != t_y.shape:
-                if r_y.shape == t_y.shape[::-1]:
-                    t_y = t_y.T
-                else:
-                    t_y = cv2.resize(t_y, (r_y.shape[1], r_y.shape[0]), interpolation=cv2.INTER_CUBIC)
-            psnr, ssim = compute_metrics(r_y, t_y)
-        else:
-            psnr, ssim = compute_metrics(restored_np, tar_np)
+        # 1. Đo RGB metrics
+        p_rgb, s_rgb = compute_metrics(restored_np, tar_np)
+        psnr_rgb_list.append(p_rgb)
+        ssim_rgb_list.append(s_rgb)
+
+        # 2. Đo Y-channel metrics
+        r_y = 0.257 * restored_np[:, :, 0] + 0.504 * restored_np[:, :, 1] + 0.098 * restored_np[:, :, 2] + 16.0 / 255.0
+        t_y = 0.257 * tar_np[:, :, 0] + 0.504 * tar_np[:, :, 1] + 0.098 * tar_np[:, :, 2] + 16.0 / 255.0
+        if r_y.shape != t_y.shape:
+            if r_y.shape == t_y.shape[::-1]:
+                t_y = t_y.T
+            else:
+                t_y = cv2.resize(t_y, (r_y.shape[1], r_y.shape[0]), interpolation=cv2.INTER_CUBIC)
+        p_y, s_y = compute_metrics(r_y, t_y)
+        psnr_y_list.append(p_y)
+        ssim_y_list.append(s_y)
 
         lp = compute_lpips_val(restored_t, tar_t, device)
-
-        psnr_list.append(psnr)
-        ssim_list.append(ssim)
         if lp >= 0:
             lpips_list.append(lp)
 
-    if not psnr_list:
+    if not psnr_rgb_list:
         print(f"[-] Không có ảnh hợp lệ nào trong {dataset_name}!")
         return []
 
-    mean_psnr = float(np.mean(psnr_list))
-    mean_ssim = float(np.mean(ssim_list))
+    mean_psnr_y = float(np.mean(psnr_y_list))
+    mean_ssim_y = float(np.mean(ssim_y_list))
+    mean_psnr_rgb = float(np.mean(psnr_rgb_list))
+    mean_ssim_rgb = float(np.mean(ssim_rgb_list))
     valid_lpips = [x for x in lpips_list if x >= 0]
     mean_lpips = float(np.mean(valid_lpips)) if valid_lpips else -1.0
 
-    print(f"[{model_name}] {task_name} | PSNR: {mean_psnr:.2f} dB | SSIM: {mean_ssim:.4f} | LPIPS: {mean_lpips:.4f}")
+    print(f"[{model_name}] {task_name} | PSNR_Y: {mean_psnr_y:.2f} dB (RGB: {mean_psnr_rgb:.2f}) | SSIM_Y: {mean_ssim_y:.4f} (RGB: {mean_ssim_rgb:.4f}) | LPIPS: {mean_lpips:.4f}")
     return [{
         'model': model_name,
         'task': task_name,
         'dataset': dataset_name,
-        'metric_psnr': round(mean_psnr, 2),
-        'metric_ssim': round(mean_ssim, 4),
+        'metric_psnr': round(mean_psnr_y, 2),
+        'metric_ssim': round(mean_ssim_y, 4),
         'metric_lpips': round(mean_lpips, 4),
-        'num_images': len(psnr_list)
+        'num_images': len(psnr_rgb_list)
     }]
 
 def main():
