@@ -241,7 +241,7 @@ def build_model(branch: str, init_weights: str, device: torch.device):
         model = PromptIR(decoder=True)
         if init_weights and Path(init_weights).exists():
             print(f"Nạp trọng số PromptIR từ: {init_weights}")
-            ckpt = torch.load(init_weights, map_location='cpu')
+            ckpt = torch.load(init_weights, map_location='cpu', weights_only=False)
             state = ckpt.get('state_dict', ckpt.get('params', ckpt))
             clean_state = {k.replace('net.', '').replace('module.', ''): v for k, v in state.items()}
             model.load_state_dict(clean_state, strict=False)
@@ -279,6 +279,8 @@ def run_experiment():
     parser.add_argument('--val_dir', type=str, default="data/val_v2/clean", help="Thư mục ảnh val sạch")
     parser.add_argument('--test_dir', type=str, default="data/test", help="Thư mục ảnh test")
     parser.add_argument('--output_dir', type=str, default="runs/pilot_v2", help="Thư mục lưu log và checkpoints")
+    parser.add_argument('--resume', type=str, default=None, help="Đường dẫn checkpoint để tiếp tục huấn luyện")
+    parser.add_argument('--save_every', type=int, default=250, help="Tần suất lưu checkpoint định kỳ phục vụ resume")
     args = parser.parse_args()
 
     if args.smoke_test:
@@ -317,30 +319,60 @@ def run_experiment():
     weights_path = (REPO_ROOT / args.init_weights).resolve()
     model = build_model(args.branch, str(weights_path), device)
 
-    # 5. Chuẩn bị DataLoader xác định & Kiểm định Checksum thứ tự batch
+    # 5. Chuẩn bị DataLoader xác định & Kiểm định Checksum thứ tự batch từ iter(train_loader)
     train_dataset = AiOIRDatasetV2(train_path, patch_size=128, length=max(50, args.iters * args.batch_size), seed=args.seed)
 
-    # Tính checksum 50 mẫu đầu chứng minh thứ tự batch đồng nhất 100%
-    sample_fps = []
-    for k in range(min(50, len(train_dataset))):
-        d_k, c_k, t_k = train_dataset[k]
-        sample_fps.append(f"{t_k}_{d_k.sum().item():.2f}")
-    batch_checksum = hashlib.sha256("||".join(sample_fps).encode()).hexdigest()[:12]
-    print(f"[KIỂM ĐỊNH ĐỒNG BỘ BATCH] Seed {args.seed} | Checksum 50 mẫu đầu: {batch_checksum}", flush=True)
+    train_gen = torch.Generator()
+    train_gen.manual_seed(args.seed)
+    num_workers = 2 if (device.type == 'cuda' and os.name != 'nt') else 0
+    if os.name == 'nt' and num_workers == 0:
+        print("[LƯU Ý HỆ ĐIỀU HÀNH] Chạy trên Windows CPU: num_workers=0 để tránh deadlock spawn đa tiến trình. Cần xác nhận lại trên Colab T4 Linux với num_workers=2.", flush=True)
 
-    # Tự động so sánh checksum giữa các nhánh trên cùng seed và RAISE nếu có sai lệch
-    checksum_file = (REPO_ROOT / args.output_dir / f"batch_checksum_seed_{args.seed}.txt").resolve()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        generator=train_gen,
+        worker_init_fn=seed_worker,
+        pin_memory=(device.type == 'cuda')
+    )
+
+    # Tính checksum 50 batch đầu tiên trực tiếp từ iter(train_loader)
+    print("[KIỂM ĐỊNH ĐỒNG BỘ BATCH] Đang trích xuất và băm 50 batch trực tiếp từ iter(train_loader)...", flush=True)
+    temp_iter = iter(train_loader)
+    batch_hashes = []
+    num_check_batches = min(50, len(train_loader))
+    for b_idx in range(num_check_batches):
+        d_b, c_b, t_b = next(temp_iter)
+        batch_str = f"b{b_idx}_{list(t_b)}_{d_b.sum().item():.4f}_{c_b.sum().item():.4f}"
+        batch_hashes.append(batch_str)
+    batch_checksum = hashlib.sha256("||".join(batch_hashes).encode()).hexdigest()[:16]
+    print(f">> Seed {args.seed} | Checksum 50 batch từ DataLoader: {batch_checksum}", flush=True)
+
+    # Lưu checksum theo quy ước: batch_checksum_seed_{seed}_git_{hash}_iter_{iters}.txt
+    checksum_filename = f"batch_checksum_seed_{args.seed}_git_{commit_hash[:7]}_iter_{args.iters}.txt"
+    checksum_file = (REPO_ROOT / args.output_dir / checksum_filename).resolve()
     checksum_file.parent.mkdir(parents=True, exist_ok=True)
-    if checksum_file.exists():
-        prev_checksum = checksum_file.read_text(encoding='utf-8').strip()
-        if batch_checksum != prev_checksum:
-            raise AssertionError(
-                f"[MÂU THUẪN THỨ TỰ BATCH] Checksum nhánh {args.branch} ({batch_checksum}) "
-                f"KHÔNG KHỚP với nhánh chạy trước ({prev_checksum}) trên cùng seed {args.seed}!"
-            )
-        print(f"[XÁC MINH ĐỒNG BỘ BATCH THÀNH CÔNG] Checksum {batch_checksum} khớp 100% với nhánh trước trên cùng seed {args.seed}!", flush=True)
-    else:
+
+    # Tìm bất kỳ file checksum nào đã có từ trước của cùng seed trong output_dir để kiểm tra
+    existing_checksum_files = list((REPO_ROOT / args.output_dir).glob(f"batch_checksum_seed_{args.seed}_*.txt"))
+    for prev_file in existing_checksum_files:
+        if prev_file.exists():
+            prev_ck = prev_file.read_text(encoding='utf-8').strip()
+            if batch_checksum != prev_ck:
+                raise AssertionError(
+                    f"[MÂU THUẪN PHÂN PHỐI BATCH] Checksum nhánh {args.branch} ({batch_checksum}) "
+                    f"KHÔNG KHỚP với checksum trước ({prev_ck}) tại {prev_file.name} trên cùng seed {args.seed}! "
+                    f"DataLoader bị phân kỳ giữa các nhánh!"
+                )
+            print(f"[XÁC MINH ĐỒNG BỘ BATCH THÀNH CÔNG] Checksum khớp 100% với {prev_file.name}!", flush=True)
+            break
+    if not checksum_file.exists():
         checksum_file.write_text(batch_checksum, encoding='utf-8')
+
+    # Đặt lại hạt giống train_gen để chu kỳ huấn luyện bắt đầu lại từ batch 0 chính xác 100%
+    train_gen.manual_seed(args.seed)
 
     # 6. Khởi tạo Dataset, Test Held-out Dataset & Evaluator
     evaluator = UnifiedEvaluator(device=device, use_uint8=True)
@@ -379,18 +411,6 @@ def run_experiment():
         print(f"Đã lưu kết quả Nhánh D vào: {run_dir / 'summary.json'}")
         return
 
-    gen = torch.Generator()
-    gen.manual_seed(args.seed)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=(2 if (device.type == 'cuda' and os.name != 'nt') else 0),
-        generator=gen,
-        worker_init_fn=seed_worker,
-        pin_memory=(device.type == 'cuda')
-    )
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.iters, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
@@ -399,11 +419,46 @@ def run_experiment():
     best_iter = -1
     best_metrics = {}
     history = []
+    start_iter = 0
 
-    print(f"\nTiến hành huấn luyện {args.iters} iterations...")
-    iter_count = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Không tìm thấy file checkpoint resume: {resume_path}")
+        print(f"\n>> [NẠP CHECKPOINT RESUME] Đang khôi phục trạng thái từ: {resume_path}", flush=True)
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state'])
+        optimizer.load_state_dict(ckpt['optimizer_state'])
+        scheduler.load_state_dict(ckpt['scheduler_state'])
+        scaler.load_state_dict(ckpt['scaler_state'])
+        if 'torch_rng_state' in ckpt:
+            torch.set_rng_state(ckpt['torch_rng_state'].cpu())
+        if torch.cuda.is_available() and ckpt.get('cuda_rng_state') is not None:
+            torch.cuda.set_rng_state_all(ckpt['cuda_rng_state'])
+        if 'numpy_rng_state' in ckpt:
+            np.random.set_state(ckpt['numpy_rng_state'])
+        if 'python_rng_state' in ckpt:
+            random.setstate(ckpt['python_rng_state'])
+        start_iter = ckpt['iter']
+        best_hybrid_psnr = ckpt.get('best_hybrid_psnr', -1.0)
+        best_iter = ckpt.get('best_iter', -1)
+        best_metrics = ckpt.get('best_metrics', {})
+        history = ckpt.get('history', [])
+        print(f">> [RESUME THÀNH CÔNG] Đã khôi phục hoàn chỉnh trạng thái từ iteration {start_iter}!", flush=True)
+
+    print(f"\nTiến hành huấn luyện từ iter {start_iter} đến {args.iters} iterations...")
+    iter_count = start_iter
     t_train_start = time.perf_counter()
     train_iter = iter(train_loader)
+
+    if start_iter > 0:
+        print(f">> [ĐỒNG BỘ DATALOADER] Đang tua nhanh {start_iter} batch để khớp vị trí tiếp theo...", flush=True)
+        for _ in range(start_iter):
+            try:
+                next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                next(train_iter)
 
     while iter_count < args.iters:
         iter_count += 1
@@ -468,9 +523,38 @@ def run_experiment():
                     'branch': args.branch,
                     'seed': args.seed,
                     'model_state': model.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
+                    'scheduler_state': scheduler.state_dict(),
+                    'scaler_state': scaler.state_dict(),
+                    'torch_rng_state': torch.get_rng_state(),
+                    'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    'numpy_rng_state': np.random.get_state(),
+                    'python_rng_state': random.getstate(),
                     'metrics': val_res
                 }, run_dir / "best_model.pth")
                 print(f">> [KỶ LỤC VAL MỚI] Đã lưu model tốt nhất vào: {run_dir / 'best_model.pth'}")
+
+        # Lưu Checkpoint định kỳ phục vụ Resume
+        if iter_count % args.save_every == 0 and iter_count < args.iters:
+            ckpt_path = run_dir / f"checkpoint_iter_{iter_count}.pth"
+            torch.save({
+                'iter': iter_count,
+                'branch': args.branch,
+                'seed': args.seed,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scheduler_state': scheduler.state_dict(),
+                'scaler_state': scaler.state_dict(),
+                'torch_rng_state': torch.get_rng_state(),
+                'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                'numpy_rng_state': np.random.get_state(),
+                'python_rng_state': random.getstate(),
+                'best_hybrid_psnr': best_hybrid_psnr,
+                'best_iter': best_iter,
+                'best_metrics': best_metrics,
+                'history': history,
+            }, ckpt_path)
+            print(f">> [CHECKPOINT ĐỊNH KỲ] Đã lưu trạng thái tại iter {iter_count}: {ckpt_path.name}")
 
     total_gpu_time_s = time.perf_counter() - t_train_start
     gpu_hours = round(total_gpu_time_s / 3600.0, 4)
@@ -482,6 +566,13 @@ def run_experiment():
         'branch': args.branch,
         'seed': args.seed,
         'model_state': model.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'scheduler_state': scheduler.state_dict(),
+        'scaler_state': scaler.state_dict(),
+        'torch_rng_state': torch.get_rng_state(),
+        'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        'numpy_rng_state': np.random.get_state(),
+        'python_rng_state': random.getstate(),
         'metrics': final_val_res
     }, run_dir / "final_model.pth")
 
@@ -489,13 +580,13 @@ def run_experiment():
     print(f"ĐÁNH GIÁ PRIMARY ENDPOINT: HELD-OUT TEST HYBRID-OOD (NHÁNH {args.branch} SEED {args.seed})")
     print("=" * 70)
     # Nạp lại best model để đo Primary Endpoint
-    best_ckpt = torch.load(run_dir / "best_model.pth", map_location=device)
+    best_ckpt = torch.load(run_dir / "best_model.pth", map_location=device, weights_only=False)
     model.load_state_dict(best_ckpt['model_state'])
     best_ood_res = {'psnr_mean': 24.6} if args.smoke_test else evaluator.evaluate(model, test_hybrid_ood_dataset)
     print(f">> [PRIMARY ENDPOINT] Best Model Hybrid-OOD PSNR: {best_ood_res.get('psnr_mean', 'N/A')} dB")
 
     # Đo trên final model
-    final_ckpt = torch.load(run_dir / "final_model.pth", map_location=device)
+    final_ckpt = torch.load(run_dir / "final_model.pth", map_location=device, weights_only=False)
     model.load_state_dict(final_ckpt['model_state'])
     final_ood_res = {'psnr_mean': 24.6} if args.smoke_test else evaluator.evaluate(model, test_hybrid_ood_dataset)
 

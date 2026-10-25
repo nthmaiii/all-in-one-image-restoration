@@ -16,13 +16,13 @@ from einops import rearrange
 # Nạp các khối cốt lõi từ base PromptIR
 try:
     from baselines.promptir.net.model import (
-        TransformerBlock, Downsample, Upsample, OverlapPatchEmbed, LayerNorm
+        TransformerBlock, Downsample, Upsample, OverlapPatchEmbed, LayerNorm, PromptGenBlock
     )
 except ImportError:
     # Dự phòng nạp tương đối
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from baselines.promptir.net.model import (
-        TransformerBlock, Downsample, Upsample, OverlapPatchEmbed, LayerNorm
+        TransformerBlock, Downsample, Upsample, OverlapPatchEmbed, LayerNorm, PromptGenBlock
     )
 
 class FDPromptGenBlock(nn.Module):
@@ -31,12 +31,17 @@ class FDPromptGenBlock(nn.Module):
     - x_low: Tần số thấp (chứa độ sáng nền, sương mù, độ tương phản toàn cục)
     - x_high: Tần số cao (chứa nhiễu ngẫu nhiên, vệt mưa, chi tiết cạnh biên)
     Tạo hai bộ prompt độc lập và hợp nhất thích ứng qua khối fusion.
+    Bảo toàn đồng nhất (Identity-Preserving): đầu ra = prompt cũ + prompt mới.
+    Lớp chiếu cuối cùng được zero-init để tại iter 0 đầu ra trùng khớp 100% với PromptIR pretrained.
     """
     def __init__(self, prompt_dim=128, prompt_len=5, prompt_size=96, lin_dim=192):
         super(FDPromptGenBlock, self).__init__()
         self.prompt_dim = prompt_dim
         self.prompt_len = prompt_len
         self.prompt_size = prompt_size
+
+        # 0. Khối Prompt pretrained nguyên bản của PromptIR (bảo toàn 100% tri thức nền)
+        self.base_prompt = PromptGenBlock(prompt_dim=prompt_dim, prompt_len=prompt_len, prompt_size=prompt_size, lin_dim=lin_dim)
 
         # 1. Hai kho tham số Prompt độc lập: Thấp tần & Cao tần
         self.prompt_low = nn.Parameter(torch.randn(1, prompt_len, prompt_dim, prompt_size, prompt_size) * 0.02)
@@ -53,37 +58,39 @@ class FDPromptGenBlock(nn.Module):
         self.fusion = nn.Sequential(
             nn.Conv2d(prompt_dim * 2, prompt_dim, kernel_size=1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(prompt_dim, prompt_dim, kernel_size=3, stride=1, padding=1, bias=False)
+            nn.Conv2d(prompt_dim, prompt_dim, kernel_size=3, stride=1, padding=1, bias=True)
         )
 
-    def forward(self, x):
-        B, C, H, W = x.shape
+        # KHỞI TẠO BẢO TOÀN ĐỒNG NHẤT:
+        # Zero-init ma trận chiếu CUỐI (weights + bias) của khối mới, KHÔNG dùng scalar alpha
+        nn.init.zeros_(self.fusion[-1].weight)
+        nn.init.zeros_(self.fusion[-1].bias)
 
-        # A. Phân tách tần số
+    def forward(self, x):
+        # A. Prompt pretrained nguyên bản
+        base_p = self.base_prompt(x)
+
+        # B. Phân tách tần số
+        B, C, H, W = x.shape
         x_low = self.low_pass(x)
         x_high = x - x_low
 
-        # B. Trích xuất vector mô tả tần số
-        # - Low-frequency descriptor: Cường độ DC trung bình
         emb_low = x_low.mean(dim=(-2, -1))
-        # - High-frequency descriptor: Năng lượng / Độ lệch chuẩn AC
         emb_high = torch.sqrt(torch.var(x_high, dim=(-2, -1), unbiased=False) + 1e-6)
 
-        # C. Trọng số softmax trên 2 kho prompt độc lập
         weights_low = F.softmax(self.fc_low(emb_low), dim=1)
         weights_high = F.softmax(self.fc_high(emb_high), dim=1)
 
-        # D. Sinh prompt đặc thù cho từng dải tần
         p_low = (weights_low.view(B, self.prompt_len, 1, 1, 1) * self.prompt_low).sum(dim=1)
         p_high = (weights_high.view(B, self.prompt_len, 1, 1, 1) * self.prompt_high).sum(dim=1)
 
-        # E. Nội suy không gian về (H, W)
         p_low = F.interpolate(p_low, (H, W), mode="bilinear", align_corners=False)
         p_high = F.interpolate(p_high, (H, W), mode="bilinear", align_corners=False)
 
-        # F. Hợp nhất hai luồng prompt
         prompt_fused = self.fusion(torch.cat([p_low, p_high], dim=1))
-        return prompt_fused
+
+        # Bảo toàn đồng nhất: đầu ra = prompt cũ + prompt mới
+        return base_p + prompt_fused
 
     def get_orthogonal_loss(self):
         """Tính hàm mất mát trực giao hóa (OPR) trên cả 2 kho prompt.
@@ -274,17 +281,21 @@ class FDPromptIR(nn.Module):
         ) / 3.0
 
     def load_pretrained_promptir(self, ckpt_path):
-        """Tải trọng số backbone từ pretrained PromptIR để warm-start."""
+        """Tải trọng số backbone và prompt pretrained từ PromptIR để bảo toàn đồng nhất."""
         print(f"Khởi tạo trọng số từ pretrained PromptIR: {ckpt_path}")
         checkpoint = torch.load(str(ckpt_path), map_location='cpu')
         state_dict = checkpoint.get('state_dict', checkpoint.get('params', checkpoint))
         clean_state = {}
         for k, v in state_dict.items():
             clean_k = k.replace('net.', '').replace('module.', '')
-            # Bỏ qua các trọng số của PromptGenBlock cũ để FDPromptGenBlock tự khởi tạo mới
-            if 'prompt1.' in clean_k or 'prompt2.' in clean_k or 'prompt3.' in clean_k:
-                continue
+            # Chuyển hướng các trọng số prompt cũ vào base_prompt
+            if 'prompt1.' in clean_k:
+                clean_k = clean_k.replace('prompt1.', 'prompt1.base_prompt.')
+            elif 'prompt2.' in clean_k:
+                clean_k = clean_k.replace('prompt2.', 'prompt2.base_prompt.')
+            elif 'prompt3.' in clean_k:
+                clean_k = clean_k.replace('prompt3.', 'prompt3.base_prompt.')
             clean_state[clean_k] = v
 
         missing, unexpected = self.load_state_dict(clean_state, strict=False)
-        print(f">> Backbone PromptIR đã nạp thành công! (Số layer nạp: {len(clean_state)}, lớp mới tự khởi tạo: {len(missing)})")
+        print(f">> Backbone & Pretrained Prompt đã nạp thành công! (Số layer nạp: {len(clean_state)}, lớp mới zero-init: {len(missing)})")

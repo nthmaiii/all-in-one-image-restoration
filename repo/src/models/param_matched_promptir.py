@@ -17,9 +17,11 @@ import torch.nn.functional as F
 
 try:
     from src.models.fd_promptir import FDPromptIR
+    from baselines.promptir.net.model import PromptGenBlock
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from src.models.fd_promptir import FDPromptIR
+    from baselines.promptir.net.model import PromptGenBlock
 
 class SpatialDualPromptGenBlock(nn.Module):
     """Khối sinh Prompt kép trong miền không gian (Parameter-Matched Spatial Dual Prompt Block).
@@ -28,12 +30,17 @@ class SpatialDualPromptGenBlock(nn.Module):
     - fc_1 & fc_2: Cùng kích thước với fc_low & fc_high.
     - fusion: Cùng kích thước với fusion block của FDPromptGenBlock.
     - Không lọc tần số: Trích xuất đặc trưng không gian trực tiếp (Mean & Std).
+    - Bảo toàn đồng nhất (Identity-Preserving): đầu ra = prompt cũ + prompt mới.
+    - Zero-init lớp chiếu cuối để tại iter 0 đầu ra trùng khớp 100% với PromptIR pretrained.
     """
     def __init__(self, prompt_dim=128, prompt_len=5, prompt_size=96, lin_dim=192):
         super(SpatialDualPromptGenBlock, self).__init__()
         self.prompt_dim = prompt_dim
         self.prompt_len = prompt_len
         self.prompt_size = prompt_size
+
+        # 0. Khối Prompt pretrained nguyên bản của PromptIR (bảo toàn 100% tri thức nền)
+        self.base_prompt = PromptGenBlock(prompt_dim=prompt_dim, prompt_len=prompt_len, prompt_size=prompt_size, lin_dim=lin_dim)
 
         # 1. Hai kho prompt tham số hóa
         self.prompt_bank1 = nn.Parameter(torch.randn(1, prompt_len, prompt_dim, prompt_size, prompt_size) * 0.02)
@@ -47,10 +54,18 @@ class SpatialDualPromptGenBlock(nn.Module):
         self.fusion = nn.Sequential(
             nn.Conv2d(prompt_dim * 2, prompt_dim, kernel_size=1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(prompt_dim, prompt_dim, kernel_size=3, stride=1, padding=1, bias=False)
+            nn.Conv2d(prompt_dim, prompt_dim, kernel_size=3, stride=1, padding=1, bias=True)
         )
 
+        # KHỞI TẠO BẢO TOÀN ĐỒNG NHẤT:
+        # Zero-init ma trận chiếu CUỐI (weights + bias) của khối mới, KHÔNG dùng scalar alpha
+        nn.init.zeros_(self.fusion[-1].weight)
+        nn.init.zeros_(self.fusion[-1].bias)
+
     def forward(self, x):
+        # A. Prompt pretrained nguyên bản
+        base_p = self.base_prompt(x)
+
         B, C, H, W = x.shape
 
         # Đặc trưng miền không gian thuần túy (Global Spatial Descriptors)
@@ -72,7 +87,9 @@ class SpatialDualPromptGenBlock(nn.Module):
 
         # Hợp nhất 2 luồng prompt
         prompt_fused = self.fusion(torch.cat([p1, p2], dim=1))
-        return prompt_fused
+
+        # Bảo toàn đồng nhất
+        return base_p + prompt_fused
 
     def get_orthogonal_loss(self):
         """Tính hàm mất mát OPR tương đương để bảo đảm công bằng tối đa với Branch B."""
