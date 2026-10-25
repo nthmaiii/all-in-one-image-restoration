@@ -88,6 +88,7 @@ class FDPromptGenBlock(nn.Module):
         p_high = F.interpolate(p_high, (H, W), mode="bilinear", align_corners=False)
 
         prompt_fused = self.fusion(torch.cat([p_low, p_high], dim=1))
+        self.last_ratio = (prompt_fused.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item()
 
         # Bảo toàn đồng nhất: đầu ra = prompt cũ + prompt mới
         return base_p + prompt_fused
@@ -279,6 +280,17 @@ class FDPromptIR(nn.Module):
             + self.prompt2.get_orthogonal_loss()
             + self.prompt3.get_orthogonal_loss()
         ) / 3.0
+
+    def get_new_block_ratio(self):
+        """Tính tỉ lệ trung bình norm giữa đầu ra khối mới và base prompt."""
+        if not self.decoder:
+            return 0.0
+        ratios = []
+        for p_name in ['prompt1', 'prompt2', 'prompt3']:
+            p_block = getattr(self, p_name, None)
+            if p_block is not None and hasattr(p_block, 'last_ratio'):
+                ratios.append(p_block.last_ratio)
+        return float(sum(ratios) / len(ratios)) if ratios else 0.0
 
     def load_pretrained_promptir(self, ckpt_path):
         """Tải trọng số backbone và prompt pretrained từ PromptIR để bảo toàn đồng nhất."""

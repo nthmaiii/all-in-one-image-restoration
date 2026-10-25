@@ -104,7 +104,7 @@ class AiOIRTestHybridOODDataset(Dataset):
     với lưới tham số OOD hoàn toàn không xuất hiện trong quá trình huấn luyện:
     sigma in {15, 35, 50} x t in {0.4, 0.8} (6 tổ hợp ngoại suy).
     """
-    def __init__(self, test_clean_dirs: List[Path], max_images: int = 30, seed: int = 999):
+    def __init__(self, test_clean_dirs: List[Path], max_images: int = 30, seed: int = 999, max_size: int = 512):
         self.samples = []
         clean_files = []
         for d in test_clean_dirs:
@@ -129,9 +129,9 @@ class AiOIRTestHybridOODDataset(Dataset):
             with Image.open(f) as pil_img:
                 pil_img = pil_img.convert('RGB')
                 w, h = pil_img.size
-                # Giới hạn kích thước tối đa 512x512 để kiểm định nhanh trên T4
-                if w > 512 or h > 512:
-                    pil_img = pil_img.resize((min(w, 512), min(h, 512)))
+                # Giới hạn kích thước tối đa để kiểm định nhanh
+                if w > max_size or h > max_size:
+                    pil_img = pil_img.resize((min(w, max_size), min(h, max_size)))
                 clean_np = np.array(pil_img, dtype=np.float32) / 255.0
 
             # Sinh suy thoái Hybrid xác định: Haze (Koschmieder) + Gaussian Noise

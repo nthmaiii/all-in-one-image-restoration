@@ -87,6 +87,7 @@ class SpatialDualPromptGenBlock(nn.Module):
 
         # Hợp nhất 2 luồng prompt
         prompt_fused = self.fusion(torch.cat([p1, p2], dim=1))
+        self.last_ratio = (prompt_fused.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item()
 
         # Bảo toàn đồng nhất
         return base_p + prompt_fused

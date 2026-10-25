@@ -42,7 +42,7 @@ def run_training_segment(start_iter: int, target_iter: int, resume_ckpt_path: Pa
         dataset,
         batch_size=2,
         shuffle=True,
-        num_workers=0,
+        num_workers=(2 if (device.type == 'cuda' and os.name != 'nt') else 0),
         generator=gen,
         worker_init_fn=seed_worker,
     )

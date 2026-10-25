@@ -149,10 +149,27 @@ class AiOIRDatasetV2(Dataset):
             return deg, 'hybrid'
 
     def __getitem__(self, idx):
-        # Tạo RNG xác định theo từng mẫu (idx) để đảm bảo tính tái lập 100% giữa các nhánh
-        rng = np.random.RandomState(self.seed + idx * 37)
-        file_idx = idx % len(self.image_files)
+        # 1. Tách chu kỳ (epoch) và hoán vị ảnh sạch bằng SeedSequence (chống cộng tuyến tính)
+        num_clean = len(self.image_files)
+        epoch = idx // num_clean
+        pos_in_epoch = idx % num_clean
+
+        # Hoán vị xác định thứ tự ảnh trong mỗi epoch bằng SeedSequence
+        epoch_ss = np.random.SeedSequence([self.seed, epoch, 10007])
+        epoch_rng = np.random.RandomState(int(epoch_ss.generate_state(1)[0]))
+        perm = epoch_rng.permutation(num_clean)
+        file_idx = perm[pos_in_epoch]
         img_path = self.image_files[file_idx]
+
+        # Mode suy thoái quay vòng theo ảnh và epoch: mode = (file_idx + epoch) % 4
+        # Đảm bảo:
+        # (1) Toàn bộ dữ liệu mỗi epoch có đúng 25% mỗi mode (tỉ lệ 1:1:1:1 trên toàn epoch).
+        # (2) Qua các epoch, mỗi ảnh được ghép luân phiên với đủ cả 4 mode.
+        mode = (file_idx + epoch) % 4
+
+        # RNG độc lập cho từng mẫu dùng SeedSequence phi tuyến tính
+        sample_ss = np.random.SeedSequence([self.seed, idx, file_idx])
+        sample_rng = np.random.RandomState(int(sample_ss.generate_state(1)[0]))
 
         with Image.open(img_path) as pil_img:
             img = np.array(pil_img.convert('RGB'), dtype=np.float32) / 255.0
@@ -160,20 +177,18 @@ class AiOIRDatasetV2(Dataset):
         h, w, _ = img.shape
         ps = self.patch_size
         if h > ps and w > ps:
-            y = rng.randint(0, h - ps)
-            x = rng.randint(0, w - ps)
+            y = sample_rng.randint(0, h - ps)
+            x = sample_rng.randint(0, w - ps)
             clean_patch = img[y:y+ps, x:x+ps, :]
         else:
             clean_patch = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((ps, ps)), dtype=np.float32) / 255.0
 
-        if rng.uniform(0, 1) > 0.5:
+        if sample_rng.uniform(0, 1) > 0.5:
             clean_patch = np.fliplr(clean_patch)
-        if rng.uniform(0, 1) > 0.5:
+        if sample_rng.uniform(0, 1) > 0.5:
             clean_patch = np.flipud(clean_patch)
 
-        # Khóa tỉ lệ trộn tác vụ cố định 1:1:1:1 (25% Noise, 25% Rain, 25% Haze, 25% Hybrid)
-        mode = idx % 4
-        deg_patch, task_name = self.synthesize_degradation(clean_patch, mode, rng)
+        deg_patch, task_name = self.synthesize_degradation(clean_patch, mode, sample_rng)
 
         deg_t = torch.from_numpy(deg_patch.copy()).permute(2, 0, 1).float()
         clean_t = torch.from_numpy(clean_patch.copy()).permute(2, 0, 1).float()
@@ -182,7 +197,7 @@ class AiOIRDatasetV2(Dataset):
 
 class AiOIRValDatasetV2(Dataset):
     """Dataset kiểm định cố định được sinh xác định (deterministic) từ val_dir."""
-    def __init__(self, val_clean_dir: Path, samples_per_task: int = 10, seed: int = 999):
+    def __init__(self, val_clean_dir: Path, samples_per_task: int = 10, seed: int = 999, img_size: int = 256):
         self.samples = []
         files = sorted(list(val_clean_dir.glob('*.png')) + list(val_clean_dir.glob('*.jpg')))
         if len(files) == 0:
@@ -195,7 +210,7 @@ class AiOIRValDatasetV2(Dataset):
             for i in range(samples_per_task):
                 f = files[(task_idx * samples_per_task + i) % len(files)]
                 with Image.open(f) as pil_img:
-                    pil_img = pil_img.convert('RGB').resize((256, 256))
+                    pil_img = pil_img.convert('RGB').resize((img_size, img_size))
                     clean_np = np.array(pil_img, dtype=np.float32) / 255.0
 
                 h, w, _ = clean_np.shape
@@ -268,8 +283,8 @@ def run_experiment():
     parser = argparse.ArgumentParser(description="Huấn luyện Pilot v2 đối chứng sòng phẳng")
     parser.add_argument('--branch', type=str, required=True, choices=['A', 'B', 'C', 'D'], help="Nhánh thực nghiệm (A, B, C, D)")
     parser.add_argument('--seed', type=int, default=42, help="Hạt giống ngẫu nhiên (seed: 42, 123, 2024)")
-    parser.add_argument('--iters', '--max_iter', dest='iters', type=int, default=1500, help="Số iterations huấn luyện")
-    parser.add_argument('--smoke_test', action='store_true', help="Chạy thử nghiệm nhanh (50 iterations, val_freq 50)")
+    parser.add_argument('--iters', '--max_iter', dest='iters', type=int, default=None, help="Số iterations huấn luyện")
+    parser.add_argument('--smoke_test', action='store_true', help="Chạy thử nghiệm nhanh trên tập nhỏ (ghi vào runs/smoke/, không ghi vào results/)")
     parser.add_argument('--batch_size', type=int, default=4, help="Kích thước batch")
     parser.add_argument('--lr', type=float, default=2e-4, help="Tốc độ học")
     parser.add_argument('--lambda_orth', type=float, default=0.0, help="Hệ số phạt trực giao OPR (Mặc định 0.0 theo Phương án 2)")
@@ -278,15 +293,19 @@ def run_experiment():
     parser.add_argument('--train_dir', type=str, default="data/train_v2/clean", help="Thư mục ảnh train sạch")
     parser.add_argument('--val_dir', type=str, default="data/val_v2/clean", help="Thư mục ảnh val sạch")
     parser.add_argument('--test_dir', type=str, default="data/test", help="Thư mục ảnh test")
+    parser.add_argument('--patch_size', type=int, default=128, help="Kích thước crop patch huấn luyện (mặc định 128)")
     parser.add_argument('--output_dir', type=str, default="runs/pilot_v2", help="Thư mục lưu log và checkpoints")
     parser.add_argument('--resume', type=str, default=None, help="Đường dẫn checkpoint để tiếp tục huấn luyện")
     parser.add_argument('--save_every', type=int, default=250, help="Tần suất lưu checkpoint định kỳ phục vụ resume")
     args = parser.parse_args()
 
+    if args.iters is None:
+        args.iters = 2 if args.smoke_test else 1500
+
     if args.smoke_test:
-        args.iters = 2
-        args.val_freq = 2
-        print("\n[CHẾ ĐỘ SMOKE TEST KÍCH HOẠT] Khóa 2 iterations, đánh giá validation tại iteration 2.")
+        args.output_dir = "runs/smoke"
+        args.val_freq = args.iters
+        print(f"\n[CHẾ ĐỘ SMOKE TEST KÍCH HOẠT] iters={args.iters}, ghi vào {args.output_dir}, KHÔNG bao giờ ghi vào results/.")
     elif args.iters <= 50:
         args.val_freq = args.iters
 
@@ -320,7 +339,15 @@ def run_experiment():
     model = build_model(args.branch, str(weights_path), device)
 
     # 5. Chuẩn bị DataLoader xác định & Kiểm định Checksum thứ tự batch từ iter(train_loader)
-    train_dataset = AiOIRDatasetV2(train_path, patch_size=128, length=max(50, args.iters * args.batch_size), seed=args.seed)
+    train_dataset = AiOIRDatasetV2(train_path, patch_size=args.patch_size, length=max(50, args.iters * args.batch_size), seed=args.seed)
+
+    # Tính hash nội dung code tạo dữ liệu và danh sách ảnh sạch phục vụ khóa kiểm toán
+    import inspect
+    data_code_str = inspect.getsource(AiOIRDatasetV2)
+    data_code_hash = hashlib.sha256(data_code_str.encode('utf-8')).hexdigest()[:16]
+
+    sorted_image_sigs = [f"{p.name}:{p.stat().st_size}" for p in train_dataset.image_files]
+    clean_images_hash = hashlib.sha256("||".join(sorted_image_sigs).encode('utf-8')).hexdigest()[:16]
 
     train_gen = torch.Generator()
     train_gen.manual_seed(args.seed)
@@ -350,50 +377,76 @@ def run_experiment():
     batch_checksum = hashlib.sha256("||".join(batch_hashes).encode()).hexdigest()[:16]
     print(f">> Seed {args.seed} | Checksum 50 batch từ DataLoader: {batch_checksum}", flush=True)
 
-    # Lưu checksum theo quy ước: batch_checksum_seed_{seed}_git_{hash}_iter_{iters}.txt
-    checksum_filename = f"batch_checksum_seed_{args.seed}_git_{commit_hash[:7]}_iter_{args.iters}.txt"
+    content_lock_metadata = {
+        'seed': args.seed,
+        'iters': args.iters,
+        'batch_size': args.batch_size,
+        'patch_size': args.patch_size,
+        'data_code_hash': data_code_hash,
+        'clean_images_hash': clean_images_hash,
+        'num_clean_images': len(train_dataset.image_files),
+        'batch_checksum_50': batch_checksum,
+        'git_commit': commit_hash[:7]
+    }
+
+    # Lưu checksum khóa nội dung và batch stream
+    checksum_filename = f"batch_checksum_seed_{args.seed}_patch_{args.patch_size}_batch_{args.batch_size}_iter_{args.iters}.json"
     checksum_file = (REPO_ROOT / args.output_dir / checksum_filename).resolve()
     checksum_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Tìm bất kỳ file checksum nào đã có từ trước của cùng seed trong output_dir để kiểm tra
-    existing_checksum_files = list((REPO_ROOT / args.output_dir).glob(f"batch_checksum_seed_{args.seed}_*.txt"))
-    for prev_file in existing_checksum_files:
-        if prev_file.exists():
-            prev_ck = prev_file.read_text(encoding='utf-8').strip()
-            if batch_checksum != prev_ck:
-                raise AssertionError(
-                    f"[MÂU THUẪN PHÂN PHỐI BATCH] Checksum nhánh {args.branch} ({batch_checksum}) "
-                    f"KHÔNG KHỚP với checksum trước ({prev_ck}) tại {prev_file.name} trên cùng seed {args.seed}! "
-                    f"DataLoader bị phân kỳ giữa các nhánh!"
-                )
-            print(f"[XÁC MINH ĐỒNG BỘ BATCH THÀNH CÔNG] Checksum khớp 100% với {prev_file.name}!", flush=True)
-            break
-    if not checksum_file.exists():
-        checksum_file.write_text(batch_checksum, encoding='utf-8')
+    if checksum_file.exists():
+        with open(checksum_file, 'r', encoding='utf-8') as f:
+            ref_data = json.load(f)
+
+        discrepancies = []
+        for key in ['seed', 'iters', 'batch_size', 'patch_size', 'data_code_hash', 'clean_images_hash', 'num_clean_images', 'batch_checksum_50']:
+            val_current = content_lock_metadata.get(key)
+            val_ref = ref_data.get(key)
+            if val_current != val_ref:
+                discrepancies.append(f"- Trường '{key}': Hiện tại = {val_current} vs Tham chiếu = {val_ref}")
+
+        if discrepancies:
+            disc_str = "\n".join(discrepancies)
+            raise AssertionError(
+                f"[MÂU THUẪN KHÓA NỘI DUNG VÀ PHÂN PHỐI BATCH] Nhánh {args.branch} KHÔNG KHỚP với checksum tham chiếu tại {checksum_file.name}!\n"
+                f"Chi tiết sai lệch:\n{disc_str}\n"
+                f"DataLoader hoặc dữ liệu huấn luyện bị phân kỳ giữa các nhánh!"
+            )
+        print(f"[XÁC MINH ĐỒNG BỘ BATCH & NỘI DUNG THÀNH CÔNG] Checksum khớp 100% với {checksum_file.name}!", flush=True)
+    else:
+        # Nhánh B và C BẮT BUỘC phải có checksum tham chiếu từ Nhánh A chạy trước; CẤM âm thầm ghi mới
+        if args.branch in ['B', 'C']:
+            raise FileNotFoundError(
+                f"[LỖI THIẾU CHECKSUM THAM CHIẾU] Nhánh {args.branch} bắt buộc phải so khớp với checksum "
+                f"đã tạo trước của Nhánh A tại: {checksum_file.name}. "
+                f"Không tìm thấy file checksum tham chiếu! Hãy chạy Nhánh A trước!"
+            )
+        with open(checksum_file, 'w', encoding='utf-8') as f:
+            json.dump(content_lock_metadata, f, indent=2)
+        print(f"[LƯU CHECKSUM THAM CHIẾU] Đã lưu checksum chuẩn Nhánh {args.branch} (seed {args.seed}, iters {args.iters}, patch {args.patch_size}, batch {args.batch_size}) -> {checksum_file.name}", flush=True)
 
     # Đặt lại hạt giống train_gen để chu kỳ huấn luyện bắt đầu lại từ batch 0 chính xác 100%
     train_gen.manual_seed(args.seed)
 
-    # 6. Khởi tạo Dataset, Test Held-out Dataset & Evaluator
+    # 6. Khởi tạo Dataset, Test Held-out Dataset & Evaluator (Evaluator THẬT 100%, không số liệu gán cứng)
     evaluator = UnifiedEvaluator(device=device, use_uint8=True)
-    val_dataset = AiOIRValDatasetV2(val_path, samples_per_task=10, seed=args.seed)
+    val_samples = 1 if args.smoke_test else 10
+    ood_samples = 1 if args.smoke_test else 30
+    eval_val_size = 128 if args.smoke_test else 256
+    eval_ood_size = 128 if args.smoke_test else 512
+    val_dataset = AiOIRValDatasetV2(val_path, samples_per_task=val_samples, seed=args.seed, img_size=eval_val_size)
 
     test_clean_dirs = [
         test_path / 'denoise' / 'bsd68',
         test_path / 'denoise' / 'kodak24',
         test_path / 'dehaze' / 'target'
     ]
-    test_hybrid_ood_dataset = AiOIRTestHybridOODDataset(test_clean_dirs, max_images=30, seed=args.seed)
+    test_hybrid_ood_dataset = AiOIRTestHybridOODDataset(test_clean_dirs, max_images=ood_samples, seed=args.seed, max_size=eval_ood_size)
 
-    # ĐO LƯỜNG ĐẶC BIỆT TẠI ITERATION 0 (TRƯỚC FINE-TUNE)
-    print("\n--- [ITERATION 0: ĐO ĐẠC MỨC NỀN TRƯỚC HUẤN LUYỆN] ---", flush=True)
-    if args.smoke_test:
-        print("[SMOKE TEST] Bỏ qua forward pass nặng tại iter 0 để kiểm tra cú pháp nhanh.", flush=True)
-        val_res_0 = {'psnr_hybrid': 25.0, 'psnr_mean': 25.0, 'psnr_noise': 25.0, 'psnr_rain': 25.0, 'psnr_haze': 25.0}
-        ood_res_0 = {'psnr_mean': 24.5}
-    else:
-        val_res_0 = evaluator.evaluate(model, val_dataset)
-        ood_res_0 = evaluator.evaluate(model, test_hybrid_ood_dataset)
+    # ĐO LƯỜNG ĐẶC BIỆT TẠI ITERATION 0 (TRƯỚC FINE-TUNE) — CHẠY EVALUATOR THẬT
+    print("\n--- [ITERATION 0: ĐO ĐẠC MỨC NỀN TRƯỚC HUẤN LUYỆN - THỰC TẾ] ---", flush=True)
+    val_res_0 = evaluator.evaluate(model, val_dataset)
+    ood_res_0 = evaluator.evaluate(model, test_hybrid_ood_dataset)
     print(f"Iter 0 (Pre-train) | Val Hybrid PSNR: {val_res_0.get('psnr_hybrid', 'N/A')} dB | Held-out Hybrid-OOD PSNR: {ood_res_0.get('psnr_mean', 'N/A')} dB", flush=True)
 
     # Nếu là nhánh D: Đánh giá Zero-shot và kết thúc
@@ -499,15 +552,16 @@ def run_experiment():
         if iter_count % 50 == 0 or iter_count == 1:
             cos_pool, cos_flat = get_prompt_cosine_stats(model)
             cos_str = f" | Cos_Pool: {cos_pool} | Cos_Flat: {cos_flat}" if cos_pool != "N/A" else ""
-            print(f"Iter [{iter_count:4d}/{args.iters}] | Recon Loss: {loss_recon.item():.4f} | Orth Loss: {loss_orth.item():.4f}{cos_str} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {elapsed_step:.2f}s")
+            ratio_str = ""
+            if hasattr(model, 'get_new_block_ratio'):
+                ratio = model.get_new_block_ratio()
+                ratio_str = f" | Ratio(New/Base): {ratio:.4f}"
+            print(f"Iter [{iter_count:4d}/{args.iters}] | Recon Loss: {loss_recon.item():.4f} | Orth Loss: {loss_orth.item():.4f}{cos_str}{ratio_str} | LR: {scheduler.get_last_lr()[0]:.2e} | Time: {elapsed_step:.2f}s")
 
-        # 7. Đánh giá Validation định kỳ
+        # 7. Đánh giá Validation định kỳ (Evaluator THẬT 100%)
         if iter_count % args.val_freq == 0 or iter_count == args.iters:
-            print(f"\n--- [VAL ITER {iter_count}] Đang đánh giá trên Val v2 ---")
-            if args.smoke_test:
-                val_res = {'psnr_mean': 25.1, 'psnr_hybrid': 25.1, 'psnr_noise': 25.0, 'psnr_rain': 25.0, 'psnr_haze': 25.0}
-            else:
-                val_res = evaluator.evaluate(model, val_dataset)
+            print(f"\n--- [VAL ITER {iter_count}] Đang đánh giá trên Val v2 (Evaluator THẬT) ---")
+            val_res = evaluator.evaluate(model, val_dataset)
             print(f"PSNR Mean: {val_res['psnr_mean']:.2f} dB | Hybrid: {val_res['psnr_hybrid']:.2f} dB | Noise: {val_res['psnr_noise']:.2f} | Rain: {val_res['psnr_rain']:.2f} | Haze: {val_res['psnr_haze']:.2f}")
 
             val_res['iter'] = iter_count
@@ -560,7 +614,7 @@ def run_experiment():
     gpu_hours = round(total_gpu_time_s / 3600.0, 4)
 
     # 8. Lưu Checkpoint cuối cùng & Đánh giá Primary Endpoint (Held-out Test Hybrid-OOD)
-    final_val_res = val_res if args.smoke_test else evaluator.evaluate(model, val_dataset)
+    final_val_res = val_res if (iter_count == args.iters and 'val_res' in locals()) else evaluator.evaluate(model, val_dataset)
     torch.save({
         'iter': args.iters,
         'branch': args.branch,
@@ -579,16 +633,19 @@ def run_experiment():
     print("\n" + "=" * 70)
     print(f"ĐÁNH GIÁ PRIMARY ENDPOINT: HELD-OUT TEST HYBRID-OOD (NHÁNH {args.branch} SEED {args.seed})")
     print("=" * 70)
-    # Nạp lại best model để đo Primary Endpoint
-    best_ckpt = torch.load(run_dir / "best_model.pth", map_location=device, weights_only=False)
-    model.load_state_dict(best_ckpt['model_state'])
-    best_ood_res = {'psnr_mean': 24.6} if args.smoke_test else evaluator.evaluate(model, test_hybrid_ood_dataset)
-    print(f">> [PRIMARY ENDPOINT] Best Model Hybrid-OOD PSNR: {best_ood_res.get('psnr_mean', 'N/A')} dB")
-
     # Đo trên final model
     final_ckpt = torch.load(run_dir / "final_model.pth", map_location=device, weights_only=False)
     model.load_state_dict(final_ckpt['model_state'])
-    final_ood_res = {'psnr_mean': 24.6} if args.smoke_test else evaluator.evaluate(model, test_hybrid_ood_dataset)
+    final_ood_res = evaluator.evaluate(model, test_hybrid_ood_dataset)
+
+    # Nạp lại best model để đo Primary Endpoint (nếu best_iter != iters)
+    if best_iter == args.iters:
+        best_ood_res = final_ood_res
+    else:
+        best_ckpt = torch.load(run_dir / "best_model.pth", map_location=device, weights_only=False)
+        model.load_state_dict(best_ckpt['model_state'])
+        best_ood_res = evaluator.evaluate(model, test_hybrid_ood_dataset)
+    print(f">> [PRIMARY ENDPOINT] Best Model Hybrid-OOD PSNR: {best_ood_res.get('psnr_mean', 'N/A')} dB")
 
     print("\n" + "=" * 70)
     print(f"HOÀN TẤT THỰC NGHIỆM NHÁNH {args.branch} (SEED {args.seed})")
@@ -615,8 +672,11 @@ def run_experiment():
     with open(run_dir / "summary.json", "w", encoding='utf-8') as f:
         json.dump(summary_data, f, indent=2)
 
-    # Cập nhật kết quả vào CSV tổng
-    csv_file = REPO_ROOT / "results" / "pilot_v2_results.csv"
+    # Cập nhật kết quả vào CSV tổng: Nếu là smoke_test thì lưu vào runs/smoke/, TUYỆT ĐỐI KHÔNG ghi vào results/
+    if args.smoke_test:
+        csv_file = REPO_ROOT / "runs" / "smoke" / "smoke_pilot_v2_results.csv"
+    else:
+        csv_file = REPO_ROOT / "results" / "pilot_v2_results.csv"
     csv_file.parent.mkdir(parents=True, exist_ok=True)
     header = "branch,seed,checkpoint_type,iter,gpu_hours,val_psnr_noise,val_psnr_rain,val_psnr_haze,val_psnr_hybrid,val_psnr_mean,primary_endpoint_ood_psnr\n"
     if not csv_file.exists():
