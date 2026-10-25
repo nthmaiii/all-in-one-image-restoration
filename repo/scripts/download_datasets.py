@@ -175,14 +175,55 @@ def setup_clean_rain100l(rain_root):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Tải tài nguyên dữ liệu và checkpoint cho AiOIR")
+    parser.add_argument('data_dir', nargs='?', default=None, help='Thư mục dữ liệu (tùy chọn)')
     parser.add_argument('--weights_only', action='store_true', help='Chỉ tải checkpoint')
     parser.add_argument('--data_only', action='store_true', help='Chỉ tải dữ liệu test')
-    args = parser.parse_args()
+    parser.add_argument('--pilot_v2', action='store_true', help='Tải nhanh tài nguyên tối thiểu cho Pilot v2 (promptir_all.ckpt, bsd68, kodak24)')
+    args, unknown = parser.parse_known_args()
 
     print(f"=== P0-T3: BẮT ĐẦU TẢI DỮ LIỆU & CHECKPOINT (Thư mục gốc: {BASE_DIR}) ===")
     test_root = BASE_DIR / 'data' / 'test'
     weights_root = BASE_DIR / 'baselines' / 'weights'
     weights_root.mkdir(parents=True, exist_ok=True)
+    valid_exts = {'.png', '.jpg', '.jpeg', '.bmp'}
+
+    if args.pilot_v2:
+        print("\n=== [PILOT V2 FAST RESOURCE PREPARATION] ===")
+        # 1. Tải PromptIR Checkpoint
+        promptir_ckpt = weights_root / 'promptir_all.ckpt'
+        download_file('1j-b5Od70pGF7oaCqKAfUzmf-N-xEAjYl', promptir_ckpt, 'PromptIR All-in-One Checkpoint (All.ckpt, ~140MB)')
+
+        # 2. CBSD68
+        bsd_dir = test_root / 'denoise' / 'bsd68'
+        bsd_zip = test_root / 'denoise' / 'cbsd68.zip'
+        bsd_count = sum(1 for f in bsd_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts) if bsd_dir.exists() else 0
+        if bsd_count < 68:
+            download_file('1lxXQ_buMll_JVWxKpk5fp0jduW5F_MHe', bsd_zip, 'CBSD68 Denoising Testset (68 ảnh)')
+            bsd_dir.mkdir(parents=True, exist_ok=True)
+            if bsd_zip.exists():
+                with zipfile.ZipFile(str(bsd_zip), 'r') as z:
+                    z.extractall(str(bsd_dir))
+                unpack_and_flatten_zips(bsd_dir)
+
+        # 3. Kodak24
+        kodak_dir = test_root / 'denoise' / 'kodak24'
+        kodak_zip = test_root / 'denoise' / 'kodak24.zip'
+        kodak_count = sum(1 for f in kodak_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts) if kodak_dir.exists() else 0
+        if kodak_count < 24:
+            download_file('1F4_mv4oTXhiG-zyG9DI4OO05KqvEKhs9', kodak_zip, 'Kodak24 Denoising Testset (24 ảnh)')
+            kodak_dir.mkdir(parents=True, exist_ok=True)
+            if kodak_zip.exists():
+                with zipfile.ZipFile(str(kodak_zip), 'r') as z:
+                    z.extractall(str(kodak_dir))
+                unpack_and_flatten_zips(kodak_dir)
+
+        bsd_count = sum(1 for f in bsd_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts) if bsd_dir.exists() else 0
+        kodak_count = sum(1 for f in kodak_dir.glob('*') if f.is_file() and f.suffix.lower() in valid_exts) if kodak_dir.exists() else 0
+        print(f"\n-> [SẴN SÀNG] PromptIR Checkpoint: {promptir_ckpt.exists()}")
+        print(f"-> [SẴN SÀNG] BSD68   : {bsd_count}/68 ảnh")
+        print(f"-> [SẴN SÀNG] Kodak24 : {kodak_count}/24 ảnh")
+        print("=== HOÀN TẤT CHUẨN BỊ TÀI NGUYÊN PILOT V2 ===")
+        return
 
     if not args.data_only:
         # 1. Tải PromptIR Checkpoint
