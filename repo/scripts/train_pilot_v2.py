@@ -264,7 +264,8 @@ def run_experiment():
     parser = argparse.ArgumentParser(description="Huấn luyện Pilot v2 đối chứng sòng phẳng")
     parser.add_argument('--branch', type=str, required=True, choices=['A', 'B', 'C', 'D'], help="Nhánh thực nghiệm (A, B, C, D)")
     parser.add_argument('--seed', type=int, default=42, help="Hạt giống ngẫu nhiên (seed)")
-    parser.add_argument('--iters', type=int, default=1500, help="Số iterations huấn luyện")
+    parser.add_argument('--iters', '--max_iter', dest='iters', type=int, default=1500, help="Số iterations huấn luyện (hoặc --max_iter 50)")
+    parser.add_argument('--smoke_test', action='store_true', help="Chạy thử nghiệm nhanh (50 iterations, val_freq 50)")
     parser.add_argument('--batch_size', type=int, default=4, help="Kích thước batch")
     parser.add_argument('--lr', type=float, default=2e-4, help="Tốc độ học")
     parser.add_argument('--lambda_orth', type=float, default=0.0, help="Hệ số phạt trực giao OPR (Mặc định 0.0 theo Phương án 2)")
@@ -275,6 +276,13 @@ def run_experiment():
     parser.add_argument('--test_dir', type=str, default="data/test", help="Thư mục ảnh test")
     parser.add_argument('--output_dir', type=str, default="runs/pilot_v2", help="Thư mục lưu log và checkpoints")
     args = parser.parse_args()
+
+    if args.smoke_test:
+        args.iters = 50
+        args.val_freq = 50
+        print("\n[CHẾ ĐỘ SMOKE TEST KÍCH HOẠT] Khóa 50 iterations, đánh giá validation tại iteration 50.")
+    elif args.iters <= 50:
+        args.val_freq = args.iters
 
     # 1. Khóa seed
     set_seed(args.seed)
