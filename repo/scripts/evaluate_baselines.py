@@ -21,12 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'baselines' / 'adai
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'baselines' / 'airnet'))
 
 try:
-    from skimage.metrics import peak_signal_noise_ratio as compare_psnr
-    from skimage.metrics import structural_similarity as compare_ssim
-except ImportError:
-    pass
-
-try:
     import lpips
     loss_fn_alex = lpips.LPIPS(net='alex')
 except Exception:
@@ -47,7 +41,6 @@ def forward_padded(model, x, factor=64):
     return out[:, :, :h, :w]
 
 def resolve_file_path(p_str, search_name=None):
-    """Tìm đường dẫn thông minh, tương thích linh hoạt giữa /content và /content/repo."""
     if not p_str and not search_name:
         return None
     candidates = []
@@ -93,7 +86,6 @@ def compute_metrics(restored_np, target_np):
         return psnr, ssim
 
 def compute_lpips_val(restored_t, target_t, device):
-    """restored_t and target_t are float32 in range [0, 1], shape (1, 3, H, W)"""
     if loss_fn_alex is None:
         return -1.0
     try:
@@ -162,7 +154,6 @@ def evaluate_denoise(model, model_name, dataset_dir, sigmas=[15, 25, 50], device
             img = Image.open(img_p).convert('RGB')
             clean_t = to_tensor(img).unsqueeze(0)
             
-            # Cố định seed cho mỗi ảnh để bảo đảm tính tái lập
             torch.manual_seed(42)
             noise = torch.randn_like(clean_t) * (sigma / 255.0)
             noisy_t = torch.clamp(clean_t + noise, 0.0, 1.0)
@@ -171,7 +162,6 @@ def evaluate_denoise(model, model_name, dataset_dir, sigmas=[15, 25, 50], device
                 restored_t = forward_padded(model, noisy_t.to(device), factor=64)
                 restored_t = torch.clamp(restored_t, 0.0, 1.0).cpu()
 
-            # Chuyển đổi numpy uint8 để đo chuẩn theo protocol bài báo
             restored_np = (restored_t.squeeze(0).permute(1, 2, 0).numpy() * 255.0).round() / 255.0
             clean_np = (clean_t.squeeze(0).permute(1, 2, 0).numpy() * 255.0).round() / 255.0
 
@@ -187,7 +177,7 @@ def evaluate_denoise(model, model_name, dataset_dir, sigmas=[15, 25, 50], device
         mean_ssim = float(np.mean(ssim_list))
         mean_lpips = float(np.mean(lpips_list)) if lpips_list else -1.0
 
-        print(f"[{model_name}] Denoise sigma={sigma} | PSNR: {mean_psnr:.2f} dB | SSIM: {mean_ssim:.4f} | LPIPS: {mean_lpips:.4f}")
+        print(f"[{model_name}] Denoise ({p.name}) sigma={sigma} | PSNR: {mean_psnr:.2f} dB | SSIM: {mean_ssim:.4f} | LPIPS: {mean_lpips:.4f}")
         results.append({
             'model': model_name,
             'task': f'denoising_sigma_{sigma}',
@@ -199,7 +189,7 @@ def evaluate_denoise(model, model_name, dataset_dir, sigmas=[15, 25, 50], device
         })
     return results
 
-def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, target_dir, device='cpu', max_images=None, use_y_channel=False):
+def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, target_dir, device='cpu', max_images=None, use_y_channel=True):
     results = []
     in_p = Path(input_dir)
     tar_p = Path(target_dir)
@@ -208,14 +198,14 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
     if max_images:
         in_images = in_images[:max_images]
 
-    print(f">> Bắt đầu đánh giá {task_name} ({dataset_name}) trên {len(in_images)} cặp ảnh...")
+    print(f">> Bắt đầu đánh giá {task_name} ({dataset_name}) trên {len(in_images)} cặp ảnh (Y-channel={use_y_channel})...")
     psnr_list, ssim_list, lpips_list = [], [], []
 
     for img_file in in_images:
         tar_file = tar_p / img_file.name
         if not tar_file.exists():
-            clean_stem = img_file.stem.replace('rain-', '').replace('hazy-', '')
-            matches = list(tar_p.glob(f"{clean_stem}.*"))
+            clean_stem = img_file.name.lower().replace('rain-', '').replace('norain-', '')
+            matches = [f for f in tar_p.glob('*') if clean_stem in f.name.lower()]
             if matches:
                 tar_file = matches[0]
             else:
@@ -235,7 +225,6 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
         tar_np = (tar_t.squeeze(0).permute(1, 2, 0).numpy() * 255.0).round() / 255.0
 
         if use_y_channel:
-            # Chuyển đổi sang Y channel (chuẩn đo lường trong bài báo deraining Rain100L)
             r_y = 0.257 * restored_np[:, :, 0] + 0.504 * restored_np[:, :, 1] + 0.098 * restored_np[:, :, 2] + 16.0 / 255.0
             t_y = 0.257 * tar_np[:, :, 0] + 0.504 * tar_np[:, :, 1] + 0.098 * tar_np[:, :, 2] + 16.0 / 255.0
             psnr, ssim = compute_metrics(r_y, t_y)
@@ -271,7 +260,6 @@ def evaluate_paired(model, model_name, task_name, dataset_name, input_dir, targe
 
 def main():
     parser = argparse.ArgumentParser(description="Đánh giá mô hình AiOIR")
-    # Hỗ trợ cả --baseline và --model, không phân biệt hoa thường
     parser.add_argument('--baseline', '--model', dest='model', type=str, default='PromptIR', help='Tên mô hình baseline (PromptIR, AdaIR, AirNet)')
     parser.add_argument('--weights', type=str, default=None, help='Đường dẫn checkpoint')
     parser.add_argument('--data_dir', type=str, default='data/test', help='Thư mục chứa test datasets')
@@ -283,7 +271,6 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model, clean_name = load_baseline_model(args.model, args.weights, device=device)
 
-    # Tìm data_dir linh hoạt
     data_dir = resolve_file_path(args.data_dir)
     if not data_dir or not data_dir.exists():
         for candidate in [Path('repo/data/test'), Path('data/test'), Path('/content/repo/data/test')]:
@@ -294,30 +281,31 @@ def main():
     print(f"Sử dụng thư mục dữ liệu tại: {data_dir}")
     all_results = []
 
-    # 1. Denoise (BSD68)
+    # 1. Denoise (BSD68, Kodak24, Urban100)
     if args.task in ['all', 'denoise'] and data_dir and data_dir.exists():
-        bsd68_dir = data_dir / 'denoise' / 'bsd68'
-        if bsd68_dir.exists() and any(bsd68_dir.iterdir()):
-            res = evaluate_denoise(model, clean_name, bsd68_dir, device=device, max_images=args.max_images)
-            all_results.extend(res)
+        for sub_name in ['bsd68', 'kodak24', 'urban100']:
+            sub_dir = data_dir / 'denoise' / sub_name
+            if sub_dir.exists() and any(sub_dir.iterdir()):
+                res = evaluate_denoise(model, clean_name, sub_dir, device=device, max_images=args.max_images)
+                all_results.extend(res)
 
-    # 2. Derain (Rain100L)
+    # 2. Derain (Rain100L - Y-channel evaluation)
     if args.task in ['all', 'derain'] and data_dir and data_dir.exists():
         rain_in = data_dir / 'derain' / 'Rain100L' / 'input'
         rain_tar = data_dir / 'derain' / 'Rain100L' / 'target'
         if rain_in.exists() and any(rain_in.iterdir()):
-            res = evaluate_paired(model, clean_name, 'deraining', 'Rain100L', rain_in, rain_tar, device=device, max_images=args.max_images)
+            res = evaluate_paired(model, clean_name, 'deraining', 'Rain100L', rain_in, rain_tar, device=device, max_images=args.max_images, use_y_channel=True)
             all_results.extend(res)
 
-    # 3. Dehaze (SOTS)
+    # 3. Dehaze (SOTS nếu có)
     if args.task in ['all', 'dehaze'] and data_dir and data_dir.exists():
         haze_in = data_dir / 'dehaze' / 'input'
         haze_tar = data_dir / 'dehaze' / 'target'
         if haze_in.exists() and any(haze_in.iterdir()):
-            res = evaluate_paired(model, clean_name, 'dehazing', 'SOTS', haze_in, haze_tar, device=device, max_images=args.max_images)
+            res = evaluate_paired(model, clean_name, 'dehazing', 'SOTS', haze_in, haze_tar, device=device, max_images=args.max_images, use_y_channel=False)
             all_results.extend(res)
 
-    # Lưu kết quả vào cả 2 vị trí (results/ và repo/results/) để tránh lệch đường dẫn
+    # Lưu kết quả vào cả 2 vị trí
     target_csvs = [Path(args.output_csv)]
     if str(args.output_csv).startswith('repo/'):
         target_csvs.append(Path(str(args.output_csv)[5:]))
@@ -327,10 +315,9 @@ def main():
     for out_csv in target_csvs:
         out_csv.parent.mkdir(parents=True, exist_ok=True)
         file_exists = out_csv.exists()
-        with open(out_csv, 'a', newline='', encoding='utf-8') as f:
+        with open(out_csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['model', 'task', 'dataset', 'metric_psnr', 'metric_ssim', 'metric_lpips', 'num_images'])
-            if not file_exists:
-                writer.writeheader()
+            writer.writeheader()
             writer.writerows(all_results)
         print(f"Đã lưu kết quả đánh giá vào: {out_csv.resolve()}")
 
