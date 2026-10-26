@@ -1,0 +1,24 @@
+# Requirements for AiOIR on Google Colab (Python 3.10+, PyTorch 2.x preinstalled)
+# PyTorch, Torchvision, and CUDA are managed by Colab environment.
+
+# Tensor & Network Modules
+einops>=0.6.0
+timm>=0.9.0
+
+# Image I/O & Processing
+opencv-python>=4.7.0
+scikit-image>=0.20.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+h5py>=3.8.0
+
+# Perceptual Metrics & Model Profiling
+lpips>=0.1.4
+ptflops>=0.7.0
+
+# Configuration & Logging
+pyyaml>=6.0
+tqdm>=4.65.0
+tensorboard>=2.12.0
+gdown>=4.7.0
