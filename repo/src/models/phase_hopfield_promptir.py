@@ -173,10 +173,10 @@ class LieFrFTHopfieldBlock(nn.Module):
         self.last_energy_tensor = (quad - lse).mean()
         self.last_energy = float(self.last_energy_tensor.detach().item())
 
-        # 4. Hợp nhất động học
+        # 4. Hợp nhất động học có chặn biên (Bounded Coupling: 0.25 * tanh(gate))
         z_dyn = z_flow + omega_lie
         p_novel = self.conv_out(z_dyn)
-        gamma = torch.tanh(self.gate)
+        gamma = 0.25 * torch.tanh(self.gate)
         novel_p = gamma * p_novel
 
         self.last_ratio = float((novel_p.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item())
@@ -238,12 +238,10 @@ class ParamMatchedRigorousDualBlock(nn.Module):
         base_p = self.base_prompt(x)
         emb = x.mean(dim=(-2, -1))
 
-        # 1. Biến đổi FFT 2D Phổ phức chuẩn
+        # 1. Biến đổi FFT 2D Phổ phức chuẩn (ép float32 để tránh tràn số ComplexHalf trên AMP)
         z_in = self.conv_in(x)
-        # FFT 2D phức chuẩn
-        fft_res = torch.fft.fft2(z_in, dim=(-2, -1))
-        # Ghép kênh phức Concat[Re, Im]
-        z_fft_raw = torch.cat([fft_res.real, fft_res.imag], dim=1)
+        fft_res = torch.fft.fft2(z_in.float(), dim=(-2, -1))
+        z_fft_raw = torch.cat([fft_res.real, fft_res.imag], dim=1).to(z_in.dtype)
         z_freq = self.proj_complex(z_fft_raw)
 
         # 2. TÍCH JORDAN ĐỐI XỨNG BẬC HAI: {A, B} = AB + BA (Toán tử phi tuyến giao hoán đối xứng)
@@ -264,10 +262,10 @@ class ParamMatchedRigorousDualBlock(nn.Module):
         Z_flow = (1.0 - eta) * Z + eta * Z_retrieved
         z_flow = Z_flow.view(B, H, W, self.prompt_dim).permute(0, 3, 1, 2)
 
-        # 4. Hợp nhất
+        # 4. Hợp nhất có chặn biên
         z_dyn = z_flow + omega_jordan
         p_ctrl = self.conv_out(z_dyn)
-        gamma = torch.tanh(self.gate)
+        gamma = 0.25 * torch.tanh(self.gate)
         novel_p = gamma * p_ctrl
 
         self.last_ratio = float((novel_p.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item())
