@@ -548,6 +548,7 @@ def run_experiment():
         'test_hybrid_ood_metrics': test_hybrid_ood_metrics,
         'total_gpu_hours': round(total_gpu_hours, 4),
         'final_new_block_ratio': model.get_new_block_ratio() if hasattr(model, 'get_new_block_ratio') else 0.0,
+        'final_prototype_diversity': model.get_prototype_diversity() if hasattr(model, 'get_prototype_diversity') else {'max_cos_sim': 0.0, 'mean_cos_sim': 0.0},
         'history': history
     }
 

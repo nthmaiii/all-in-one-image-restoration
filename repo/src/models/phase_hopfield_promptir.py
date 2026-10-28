@@ -464,6 +464,33 @@ class PhaseHopfieldIR(nn.Module):
                 norms.append(p_block.last_lie_norm)
         return float(sum(norms) / len(norms)) if norms else 0.0
 
+    def get_prototype_diversity(self):
+        """Tính độ tương đồng cosine lớn nhất giữa các prototype trong M để kiểm soát sụp đổ mode (Gate 5)."""
+        if not self.decoder:
+            return {'max_cos_sim': 0.0, 'mean_cos_sim': 0.0}
+        max_sims = []
+        mean_sims = []
+        for p_name in ['prompt1', 'prompt2', 'prompt3']:
+            p_block = getattr(self, p_name, None)
+            if p_block is None:
+                continue
+            M = None
+            if hasattr(p_block, 'hopfield') and hasattr(p_block.hopfield, 'M'):
+                M = p_block.hopfield.M.squeeze(0)  # [K, d]
+            elif hasattr(p_block, 'M'):
+                M = p_block.M  # [K, d]
+            if M is not None and M.shape[0] > 1:
+                M_norm = F.normalize(M, p=2, dim=-1)
+                cos_sim = torch.mm(M_norm, M_norm.t())
+                K = M.shape[0]
+                eye = torch.eye(K, device=cos_sim.device, dtype=torch.bool)
+                off_diag = cos_sim[~eye]
+                max_sims.append(off_diag.max().item())
+                mean_sims.append(off_diag.mean().item())
+        max_val = max(max_sims) if max_sims else 0.0
+        mean_val = sum(mean_sims) / len(mean_sims) if mean_sims else 0.0
+        return {'max_cos_sim': float(max_val), 'mean_cos_sim': float(mean_val)}
+
     def load_pretrained_promptir(self, ckpt_path):
         print(f"Khởi tạo trọng số từ pretrained PromptIR: {ckpt_path}")
         checkpoint = torch.load(str(ckpt_path), map_location='cpu')
