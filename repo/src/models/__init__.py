@@ -1,1 +1,3 @@
 from .fd_promptir import FDPromptIR, FDPromptGenBlock
+from .param_matched_promptir import ParamMatchedPromptIR
+from .phase_hopfield_promptir import PhaseHopfieldIR, ParamMatchedPhaseHopfieldIR, LieFrFTHopfieldBlock
