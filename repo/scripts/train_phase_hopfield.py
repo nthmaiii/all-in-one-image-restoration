@@ -243,6 +243,7 @@ def run_experiment():
     parser.add_argument('--batch_size', type=int, default=4, help="Kích thước batch")
     parser.add_argument('--lr', type=float, default=1e-4, help="Tốc độ học cho pretrained backbone")
     parser.add_argument('--lr_novel', type=float, default=1e-3, help="Tốc độ học cao hơn cho khối mới (Phase-Hopfield)")
+    parser.add_argument('--lambda_hop', type=float, default=0.001, help="Hệ số điều chuẩn thế năng Lyapunov Hopfield")
     parser.add_argument('--val_freq', type=int, default=250, help="Tần suất đánh giá validation")
     parser.add_argument('--init_weights', type=str, default="baselines/weights/promptir_all.ckpt", help="Đường dẫn pretrained")
     parser.add_argument('--train_dir', type=str, default="data/train_v2/clean", help="Thư mục ảnh train sạch")
@@ -462,7 +463,11 @@ def run_experiment():
         with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
             restored = model(deg_batch)
             loss_char = torch.sqrt((restored - clean_batch) ** 2 + 1e-6).mean()
-            loss_total = loss_char
+            if args.branch == 'B' and hasattr(model, 'get_hopfield_energy_loss') and args.lambda_hop > 0:
+                loss_hop = model.get_hopfield_energy_loss()
+                loss_total = loss_char + args.lambda_hop * loss_hop
+            else:
+                loss_total = loss_char
 
         scaler.scale(loss_total).backward()
         scaler.unscale_(optimizer)
