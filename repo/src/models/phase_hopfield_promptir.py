@@ -173,13 +173,14 @@ class LieFrFTHopfieldBlock(nn.Module):
         self.last_energy_tensor = (quad - lse).mean()
         self.last_energy = float(self.last_energy_tensor.detach().item())
 
-        # 4. Hợp nhất động học có chuẩn hóa thích ứng (Adaptive Norm-Bounded Coupling: tối đa 25%)
+        # 4. Hợp nhất động học có chuẩn hóa thích ứng (Adaptive Norm-Bounded Coupling: tối đa 20%, detached scale triệt tiêu 100% NaN)
         z_dyn = z_flow + omega_lie
         p_novel = self.conv_out(z_dyn)
-        norm_novel = p_novel.norm(p=2, dim=(1, 2, 3), keepdim=True) + 1e-8
-        norm_base = base_p.norm(p=2, dim=(1, 2, 3), keepdim=True).detach()
-        gamma = torch.sigmoid(self.gate) * 0.25
-        novel_p = gamma * (p_novel / norm_novel) * norm_base
+        norm_novel = p_novel.detach().norm(p=2, dim=(1, 2, 3), keepdim=True) + 1e-8
+        norm_base = base_p.detach().norm(p=2, dim=(1, 2, 3), keepdim=True)
+        scale = (norm_base / norm_novel).clamp(max=1.0).detach()
+        gamma = torch.sigmoid(self.gate) * 0.20
+        novel_p = gamma * p_novel * scale
 
         self.last_ratio = float((novel_p.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item())
         return base_p + novel_p
@@ -264,13 +265,14 @@ class ParamMatchedRigorousDualBlock(nn.Module):
         Z_flow = (1.0 - eta) * Z + eta * Z_retrieved
         z_flow = Z_flow.view(B, H, W, self.prompt_dim).permute(0, 3, 1, 2)
 
-        # 4. Hợp nhất có chuẩn hóa thích ứng (tối đa 25%)
+        # 4. Hợp nhất có chuẩn hóa thích ứng (tối đa 20%, detached scale triệt tiêu 100% NaN)
         z_dyn = z_flow + omega_jordan
         p_ctrl = self.conv_out(z_dyn)
-        norm_ctrl = p_ctrl.norm(p=2, dim=(1, 2, 3), keepdim=True) + 1e-8
-        norm_base = base_p.norm(p=2, dim=(1, 2, 3), keepdim=True).detach()
-        gamma = torch.sigmoid(self.gate) * 0.25
-        novel_p = gamma * (p_ctrl / norm_ctrl) * norm_base
+        norm_ctrl = p_ctrl.detach().norm(p=2, dim=(1, 2, 3), keepdim=True) + 1e-8
+        norm_base = base_p.detach().norm(p=2, dim=(1, 2, 3), keepdim=True)
+        scale = (norm_base / norm_ctrl).clamp(max=1.0).detach()
+        gamma = torch.sigmoid(self.gate) * 0.20
+        novel_p = gamma * p_ctrl * scale
 
         self.last_ratio = float((novel_p.detach().norm(p=2) / (base_p.detach().norm(p=2) + 1e-8)).item())
         return base_p + novel_p
