@@ -29,14 +29,14 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.leakage_checker import verify_zero_leakage
 
 def get_base_data_dir():
-    if Path('/content/repo/data').exists():
-        return Path('/content/repo/data')
     return (REPO_ROOT / 'data').resolve()
 
-def download_and_extract_clean_pool(dest_dir: Path, target_count: int = 200):
+def download_and_extract_clean_pool(dest_dir: Path, target_count: int = 200, allow_synthetic: bool = True):
     """Tải và chuẩn bị kho ảnh sạch độc lập hoàn toàn với test."""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    existing_images = list(dest_dir.glob('*.png')) + list(dest_dir.glob('*.jpg'))
+    existing_images = sorted(list(dest_dir.glob('*.png')) + list(dest_dir.glob('*.jpg')))
+    if not allow_synthetic and any(path.name.startswith('clean_synthetic_') for path in existing_images):
+        raise ValueError("clean_pool_v2 contains synthetic fallback images; prepare a separate real-image pool for v4")
     if len(existing_images) >= target_count:
         print(f"[ĐÃ CÓ ĐỦ DỮ LIỆU] Tìm thấy {len(existing_images)} ảnh sạch tại {dest_dir}")
         return existing_images[:target_count]
@@ -79,6 +79,8 @@ def download_and_extract_clean_pool(dest_dir: Path, target_count: int = 200):
                             if len(collected) >= target_count:
                                 break
         except Exception as e:
+            if not allow_synthetic:
+                raise RuntimeError("Could not prepare real clean images. No synthetic fallback is allowed for v4.") from e
             print(f"[THÔNG BÁO] Không thể tải BSDS500 qua URL ({e}), tạo kho ảnh sạch phân vùng độc lập...")
             import numpy as np
             for i in range(len(collected), target_count):
@@ -92,10 +94,10 @@ def download_and_extract_clean_pool(dest_dir: Path, target_count: int = 200):
                 Image.fromarray(img_rgb).save(dst)
                 collected.append(dst)
 
-    return list(dest_dir.glob('*.png')) + list(dest_dir.glob('*.jpg'))
+    return sorted(list(dest_dir.glob('*.png')) + list(dest_dir.glob('*.jpg')))
 
 
-def setup_data_v2():
+def setup_data_v2(require_real_images=False):
     data_dir = get_base_data_dir()
     train_dir = data_dir / 'train_v2' / 'clean'
     val_dir = data_dir / 'val_v2' / 'clean'
@@ -105,7 +107,7 @@ def setup_data_v2():
     val_dir.mkdir(parents=True, exist_ok=True)
 
     pool_dir = data_dir / 'clean_pool_v2'
-    all_clean = download_and_extract_clean_pool(pool_dir, target_count=200)
+    all_clean = download_and_extract_clean_pool(pool_dir, target_count=200, allow_synthetic=not require_real_images)
 
     if len(all_clean) >= 200:
         # Cố định seed chia tách để bảo đảm tính tái lập
@@ -131,10 +133,18 @@ def setup_data_v2():
 
     # Chạy kiểm tra khẳng định (Assert) chống rò rỉ dữ liệu
     print("\nTiến hành kiểm toán khẳng định tính độc lập dữ liệu...")
-    if test_dir.exists():
+    if require_real_images:
+        for directory, expected in ((train_dir, 160), (val_dir, 40)):
+            files = list(directory.glob('*.png')) + list(directory.glob('*.jpg'))
+            if len(files) != expected or any(path.name.startswith('clean_synthetic_') for path in files):
+                raise ValueError(f"Expected exactly {expected} real clean images at {directory}; use a clean data partition")
+    if test_dir.exists() or require_real_images:
         verify_zero_leakage([train_dir], [val_dir], [test_dir], verbose=True)
     else:
         print("[LƯU Ý] Chưa tìm thấy thư mục data/test, bỏ qua đối chiếu test cục bộ.")
 
 if __name__ == '__main__':
-    setup_data_v2()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--require_real_images', action='store_true', help='Fail instead of synthesizing fallback images (pilot v4)')
+    setup_data_v2(parser.parse_args().require_real_images)

@@ -48,6 +48,11 @@ def compute_metrics(
     pred_np = pred_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
     gt_np = gt_tensor.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
 
+    if not np.isfinite(pred_np).all() or not np.isfinite(gt_np).all():
+        raise FloatingPointError("PSNR/SSIM requires finite predictions and targets; NaN/Inf cannot be converted to uint8.")
+    if not HAS_SKIMAGE:
+        raise ImportError("Install scikit-image to report actual SSIM metrics")
+
     pred_np = np.clip(pred_np, 0.0, 1.0)
     gt_np = np.clip(gt_np, 0.0, 1.0)
 
@@ -62,18 +67,15 @@ def compute_metrics(
         else:
             psnr = 10.0 * math.log10((255.0 ** 2) / mse)
 
-        if HAS_SKIMAGE:
-            ssim = compare_ssim(
-                pred_uint8,
-                gt_uint8,
-                channel_axis=2,
-                data_range=255,
-                win_size=11,
-                gaussian_weights=True,
-                sigma=1.5
-            )
-        else:
-            ssim = 1.0 - (mse / (255.0 ** 2))
+        ssim = compare_ssim(
+            pred_uint8,
+            gt_uint8,
+            channel_axis=2,
+            data_range=255,
+            win_size=11,
+            gaussian_weights=True,
+            sigma=1.5
+        )
     else:
         diff = pred_np.astype(np.float64) - gt_np.astype(np.float64)
         mse = np.mean(diff ** 2)
@@ -82,18 +84,15 @@ def compute_metrics(
         else:
             psnr = -10.0 * math.log10(mse)
 
-        if HAS_SKIMAGE:
-            ssim = compare_ssim(
-                pred_np,
-                gt_np,
-                channel_axis=2,
-                data_range=1.0,
-                win_size=11,
-                gaussian_weights=True,
-                sigma=1.5
-            )
-        else:
-            ssim = 1.0 - mse
+        ssim = compare_ssim(
+            pred_np,
+            gt_np,
+            channel_axis=2,
+            data_range=1.0,
+            win_size=11,
+            gaussian_weights=True,
+            sigma=1.5
+        )
 
     return float(psnr), float(ssim)
 
@@ -157,9 +156,10 @@ class AiOIRTestHybridOODDataset(Dataset):
 class UnifiedEvaluator:
     """Bộ đánh giá chuẩn hóa cho mọi mô hình AiOIR."""
 
-    def __init__(self, device: torch.device, use_uint8: bool = True):
+    def __init__(self, device: torch.device, use_uint8: bool = True, round_metrics: bool = True):
         self.device = device
         self.use_uint8 = use_uint8
+        self.round_metrics = round_metrics
 
     @torch.no_grad()
     def evaluate(self, model: nn.Module, dataset) -> Dict[str, float]:
@@ -168,12 +168,19 @@ class UnifiedEvaluator:
         task_psnr: Dict[str, List[float]] = {}
         task_ssim: Dict[str, List[float]] = {}
 
+        if len(dataset) == 0:
+            raise ValueError("Cannot evaluate an empty dataset")
+        if not HAS_SKIMAGE:
+            raise ImportError("Install scikit-image to report actual SSIM metrics")
+
         for idx in range(len(dataset)):
             deg, clean, task = dataset[idx]
             deg = deg.unsqueeze(0).to(self.device)
             clean = clean.unsqueeze(0).to(self.device)
 
             pred = forward_padded(model, deg, factor=64)
+            if not torch.isfinite(pred).all() or not torch.isfinite(clean).all():
+                raise FloatingPointError(f"Non-finite evaluation output/target at sample {idx}, task={task}")
             pred = torch.clamp(pred, 0.0, 1.0)
 
             psnr, ssim = compute_metrics(pred, clean, use_uint8_rounding=self.use_uint8)
@@ -193,13 +200,14 @@ class UnifiedEvaluator:
             ssims = task_ssim[task]
             mean_p = float(np.mean(psnrs)) if psnrs else 0.0
             mean_s = float(np.mean(ssims)) if ssims else 0.0
-            results[f'psnr_{task}'] = round(mean_p, 2)
-            results[f'ssim_{task}'] = round(mean_s, 4)
+            results[f'psnr_{task}'] = round(mean_p, 2) if self.round_metrics else mean_p
+            results[f'ssim_{task}'] = round(mean_s, 4) if self.round_metrics else mean_s
             all_psnr.extend(psnrs)
             all_ssim.extend(ssims)
 
-        results['psnr_mean'] = round(float(np.mean(all_psnr)) if all_psnr else 0.0, 2)
-        results['ssim_mean'] = round(float(np.mean(all_ssim)) if all_ssim else 0.0, 4)
+        mean_p, mean_s = float(np.mean(all_psnr)), float(np.mean(all_ssim))
+        results['psnr_mean'] = round(mean_p, 2) if self.round_metrics else mean_p
+        results['ssim_mean'] = round(mean_s, 4) if self.round_metrics else mean_s
         return results
 
     def format_table(self, results: Dict[str, float], title: str = "Evaluation Results") -> str:

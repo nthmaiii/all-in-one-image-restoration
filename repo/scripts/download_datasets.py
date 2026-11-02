@@ -17,12 +17,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 def get_base_dir():
-    if Path('/content/repo').exists():
-        return Path('/content/repo')
-    for p in [Path('.'), Path('repo'), Path('..')]:
-        if (p / 'scripts').exists() and (p / 'baselines').exists():
-            return p.resolve()
-    return Path('.').resolve()
+    return Path(__file__).resolve().parents[1]
 
 BASE_DIR = get_base_dir()
 
